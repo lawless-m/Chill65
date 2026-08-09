@@ -1,0 +1,17 @@
+/target
+
+# Third-party reference material — cloned locally, never committed.
+# See atari-recompiler-plan.md section 9 (distribution posture): the toolchain is
+# original work and publishable; game source is not redistributed. The user
+# supplies their own.
+/crystal-castles/
+/Arcade-CrystalCastles_MiSTer/
+/atari-coin-op-assembler/
+/AT6502/
+/6502_65C02_functional_tests/
+.devlog/
+
+# Session and build clutter — not part of the toolchain.
+/.claude/
+__pycache__/
+*.pyc

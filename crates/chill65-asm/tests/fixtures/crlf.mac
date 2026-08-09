@@ -1,0 +1,16 @@
+; Synthetic lexer fixture -- ORIGINAL content, not game source.
+; Deliberately not an excerpt: this repository ships the toolchain only
+; (plan section 9), so no third-party source is redistributed here.
+; Exercises tabs, comments, HLL65F block macros, macro-call operands and
+; the line-terminator handling under test.
+;  demo routine for the lexer
+LX.DEM:
+	TRAI 4*LX.MAX LX.NUM
+	LDX #0
+	STX LX.FLG	;  clear the demo flag
+	BEGIN
+	 JSR LX.SUB
+	INXS 2
+	CPX LX.NUM
+	PLEND
+	RTS

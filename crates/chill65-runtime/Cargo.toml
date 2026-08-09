@@ -1,0 +1,12 @@
+[package]
+name = "chill65-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "6502 machine state and interpreter for Atari coin-op hardware"
+
+[dependencies]
+
+[lib]
+name = "chill65_runtime"
+path = "src/lib.rs"
