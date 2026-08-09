@@ -7,17 +7,53 @@ First target: **Crystal Castles** (Atari, 1983).
 
 ## Status
 
-**Phase 0 and Phase 1 complete.** The front end reassembles the original Atari
-source to output byte-identical with the original toolchain's own — 24,576 bytes
-of program and 16,384 of castle data, both exact.
+**Phases 0, 1 and 2 complete and gated.**
+
+**Phase 1 — the assembler.** `chill65-asm` reassembles the original Atari source
+to output byte-identical with the original toolchain's own: 24,576 bytes of
+program and 16,384 of castle data, both exact.
 
 ```
 CHILL65_CORPUS=/path/to/crystal-castles \
   cargo test -p chill65-asm --test gate -- --ignored --nocapture
 ```
 
-Phase 2 (runtime and interpreter) not started. See `atari-recompiler-plan.md`
-for the full plan, and:
+**Phase 2 — the runtime.** `chill65-runtime` is a 6502 interpreter and a model
+of the Crystal Castles board: bus, ROM banking, the bitmap coordinate window,
+colour RAM, frame timing, two POKEYs with a real poly17/poly9 LFSR, switches and
+trackball. It boots the images the assembler produces and runs the game.
+
+Two independent checks say it is right:
+
+- **Klaus Dormann's 6502 test suite** — 45 million instructions, including full
+  NMOS decimal-mode flag semantics.
+- **The game's own ROM self-test**, which passes on all five devices across both
+  banks (`checksums [1, 2, 3, 4, 5]`) and provably fails on a single corrupted
+  byte. That diagnostic was written by Atari, not by us, which is what makes it
+  worth passing.
+
+```
+CHILL65_CORPUS=/path/to/crystal-castles \
+  cargo test -p chill65-runtime -- --ignored --nocapture
+```
+
+`ccrun` runs the machine headless and dumps the picture as a PPM:
+
+```
+cargo run -p chill65-runtime --bin ccrun -- prog.bin data.bin \
+  --frames 600 --dump attract.ppm
+```
+
+Attract mode is deterministic — identical frame hash across independent runs,
+which Phase 3's differential harness depends on.
+
+**Phase 3** (a differential harness against MAME) is not started. The plan is
+emphatic that it be built *before* the code emitter.
+
+Windowing and audio are deliberately out of scope; the core stays headless and
+dependency-free.
+
+See `atari-recompiler-plan.md` for the full plan, and:
 
 | Document | What it establishes |
 |---|---|
@@ -25,11 +61,12 @@ for the full plan, and:
 | `integrity.md` | Which source version to build, verified against 13 documented ROM checksums (Phase 0.2) |
 | `inventory.md` | The archive: ~20 Atari coin-op titles, in two dialect generations (Phase 0.3) |
 | `data.md` | Castle/wave data format (Phase 0.4) |
-| `hardware.md` | Memory map, ROM banking, the OUT0 latch |
+| `hardware.md` | **The Phase 2 deliverable.** The board as modelled: memory map, ROM banking, latches, video, timing, POKEY, inputs — 75 `file:line` citations, with unverified claims marked as such |
 | `frontend.md` | Why the front end is written in Rust rather than reusing AT6502 |
 | `gate1.md` | The Phase 1 gate: both images byte-identical, and the causes that closed the last 1,696 bytes |
 | `dialect.md` | The assembler dialect as implemented, and what is deliberately not |
 | `codegen-readiness.md` | Open question O3 measured: 64.4% structured control flow |
+| `gate2.md` | The Phase 2 gate: Phase 1 unregressed, the game's own self-test passing, attract mode deterministic |
 | `LOOP.md` | Working scope and stop conditions |
 
 ## You must supply your own game source
@@ -54,8 +91,9 @@ git clone https://github.com/MiSTer-devel/Arcade-CrystalCastles_MiSTer
 ## Layout
 
 ```
-crates/chill65-asm/   assembler front end for the Atari MACRO-11 dialect
-tools/                Python analysis scripts (LDA decoder, source scanners)
+crates/chill65-asm/       assembler front end for the Atari MACRO-11 dialect
+crates/chill65-runtime/   6502 interpreter and Crystal Castles machine model
+tools/                    Python analysis scripts (LDA decoder, source scanners)
 ```
 
 ## Build
