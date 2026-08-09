@@ -5,6 +5,12 @@ original assembly source into Rust for native and WebAssembly targets.
 
 First target: **Crystal Castles** (Atari, 1983).
 
+![Crystal Castles attract mode, rendered by chill65-runtime](docs/attract.png)
+
+*Attract mode at frame 600 — assembled from the original 1983 MACRO-11 source by
+`chill65-asm`, executed by `chill65-runtime`, and coloured through the board's
+own colour RAM. No game code or ROMs are distributed here; see below.*
+
 ## Status
 
 **Phases 0, 1 and 2 complete and gated.**
