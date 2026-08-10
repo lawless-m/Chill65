@@ -22,11 +22,12 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::diverge::{compare, Comparison};
+use crate::diverge::{compare, compare_offset, whole_frame_offset, Comparison};
 use crate::ours::OurRuntime;
-use crate::reference::Reference;
+use crate::reference::{Frame, Reference};
 use crate::symbols::Symbols;
 use crate::trace::Trace;
+use chill65_runtime::frame::CYCLES_PER_FRAME;
 
 /// One routine's share of the blame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +50,13 @@ pub struct Report {
     pub unattributed: usize,
     /// Routines ranked by how many differing pixels they last wrote.
     pub blame: Vec<Blame>,
+    /// The whole-frame shift applied to the oracle's stream, measured from the
+    /// two sides' capture stamps, or `None` when a side could not date its
+    /// frames and the comparison fell back to index equality.
+    ///
+    /// Zero is a result, not an absence: it means the two numberings were
+    /// measured and found to agree.
+    pub offset: Option<i64>,
 }
 
 impl fmt::Display for Report {
@@ -69,6 +77,12 @@ impl fmt::Display for Report {
         }
         if self.unattributed > 0 {
             write!(f, ", {} unattributed", self.unattributed)?;
+        }
+        match self.offset {
+            // Named even when zero: a measured zero and an unexamined
+            // assumption of zero look identical in a report that omits it.
+            Some(k) => write!(f, " [frame offset {k:+}, measured]")?,
+            None => write!(f, " [unaligned: a side could not date its frames]")?,
         }
         Ok(())
     }
@@ -138,6 +152,9 @@ pub fn localise(
             differing: 0,
             unattributed: 0,
             blame: Vec::new(),
+            // Both sides are our own runtime, so there is no second numbering
+            // to reconcile: the offset is zero by construction, not measured.
+            offset: Some(0),
         });
     };
 
@@ -158,6 +175,7 @@ pub fn localise(
         differing,
         unattributed,
         blame,
+        offset: Some(0),
     })
 }
 
@@ -174,7 +192,31 @@ pub fn localise_external(
     frames: u32,
     symbols: &Symbols,
 ) -> Result<Report, String> {
-    let comparison = compare(&ours.hashes(trace, frames)?, &other.hashes(trace, frames)?);
+    // Both sides date every frame in emulated CPU cycles, so the shift between
+    // the two numberings is measured here rather than assumed to be zero — and
+    // rather than fitted by trying shifts, which `harness.md` §12 records as
+    // having failed to discriminate.
+    //
+    // Measured from the streams in hand every time. Hard-coding the figure the
+    // calibration test printed would make this agree with a past run rather
+    // than with the run it is reporting on.
+    let mine = ours.run(trace, frames, false)?;
+    let theirs = other.run(trace, frames, false)?;
+
+    let stamps = |frames: &[Frame]| -> Option<Vec<u64>> {
+        frames.iter().map(|f| f.cycles).collect()
+    };
+    let offset = match (stamps(&mine), stamps(&theirs)) {
+        (Some(a), Some(b)) => whole_frame_offset(&a, &b, CYCLES_PER_FRAME as u64),
+        _ => None,
+    };
+
+    let a: Vec<u64> = mine.iter().map(|f| f.hash).collect();
+    let b: Vec<u64> = theirs.iter().map(|f| f.hash).collect();
+    let comparison = match offset {
+        Some(k) => compare_offset(&a, &b, k),
+        None => compare(&a, &b),
+    };
 
     let Some(frame) = comparison.first_divergence else {
         return Ok(Report {
@@ -182,12 +224,16 @@ pub fn localise_external(
             differing: 0,
             unattributed: 0,
             blame: Vec::new(),
+            offset,
         });
     };
 
+    // `frame` is in our numbering; the oracle's matching frame is that plus the
+    // measured shift.
+    let their_frame = frame as i64 + offset.unwrap_or(0);
     let mine = ours.snapshot(trace, frame as u32)?;
     let theirs = other
-        .run(trace, frame as u32 + 1, true)?
+        .run(trace, their_frame as u32 + 1, true)?
         .pop()
         .and_then(|f| f.rgb)
         .ok_or("the oracle returned no pixels for the divergent frame")?;
@@ -199,6 +245,7 @@ pub fn localise_external(
         differing,
         unattributed,
         blame,
+        offset,
     })
 }
 

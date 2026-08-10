@@ -47,6 +47,50 @@ pub fn compare(a: &[u64], b: &[u64]) -> Comparison {
     }
 }
 
+/// Compare two hash streams with `b` shifted by `k` frames: `a[n]` against
+/// `b[n + k]`.
+///
+/// `k` is a **measured** quantity, not a search parameter. Frames carry the
+/// emulated cycle they were captured at, so the shift between two streams is
+/// read off with [`whole_frame_offset`] rather than fitted by trying values —
+/// `harness.md` §12 records a shift search that could not discriminate, which
+/// is what motivated dating the frames in the first place.
+///
+/// Divergence is reported in **`a`'s frame numbers**, since `a` is ours and
+/// that is the numbering the write log and routine attribution use.
+pub fn compare_offset(a: &[u64], b: &[u64], k: i64) -> Comparison {
+    // The overlap: indices n where both a[n] and b[n+k] exist.
+    let lo = (-k).max(0) as usize;
+    let hi = a.len().min((b.len() as i64 - k).max(0) as usize);
+    let compared = hi.saturating_sub(lo);
+
+    let first_divergence = (lo..hi).find(|&n| a[n] != b[(n as i64 + k) as usize]);
+
+    Comparison {
+        compared,
+        first_divergence,
+        lengths: (a.len() != b.len()).then_some((a.len(), b.len())),
+    }
+}
+
+/// The whole-frame shift between two streams of capture stamps.
+///
+/// Both sides date every frame in emulated CPU cycles, so `theirs[n] -
+/// ours[n]` divided by the frame period is how many frames apart the two
+/// numberings are. Taken at the **start** of the run, where neither side has
+/// accumulated any drift.
+///
+/// **Nearest, not floor.** A difference of −2 cycles is not "one frame behind";
+/// flooring would say so, and the caller turns this into an applied shift.
+///
+/// Returns `None` when either side is unstamped or empty, which means compare
+/// by index and say so — never guess.
+pub fn whole_frame_offset(ours: &[u64], theirs: &[u64], period: u64) -> Option<i64> {
+    let (a, b) = (*ours.first()?, *theirs.first()?);
+    let delta = b as i64 - a as i64;
+    Some((delta as f64 / period as f64).round() as i64)
+}
+
 /// Render a stream as text: one 16-hex-digit hash per line.
 pub fn write_stream(path: &Path, hashes: &[u64]) -> Result<(), String> {
     let mut text = String::with_capacity(hashes.len() * 17);
@@ -129,5 +173,61 @@ mod tests {
         let c = compare(&[], &[1]);
         assert_eq!(c.first_divergence, None);
         assert_eq!(c.lengths, Some((0, 1)));
+    }
+
+    /// A stream against its own shift agrees at the matching offset and only
+    /// there — which is what makes a measured `k` worth applying.
+    #[test]
+    fn a_shifted_stream_matches_at_its_own_offset() {
+        let a = [10u64, 11, 12, 13, 14, 15];
+        // b is a delayed by two frames: b[n + 2] == a[n].
+        let b = [98u64, 99, 10, 11, 12, 13, 14, 15];
+
+        let aligned = compare_offset(&a, &b, 2);
+        assert_eq!(aligned.first_divergence, None, "{aligned:?}");
+        assert_eq!(aligned.compared, 6);
+
+        for wrong in [-1i64, 0, 1, 3] {
+            let c = compare_offset(&a, &b, wrong);
+            assert!(
+                c.first_divergence.is_some(),
+                "offset {wrong} should not align: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_negative_offset_reaches_back() {
+        // b runs two frames ahead of a: b[n - 2] == a[n].
+        let a = [0u64, 0, 10, 11, 12];
+        let b = [10u64, 11, 12];
+        let c = compare_offset(&a, &b, -2);
+        assert_eq!(c.first_divergence, None, "{c:?}");
+        assert_eq!(c.compared, 3);
+    }
+
+    #[test]
+    fn divergence_is_reported_in_our_frame_numbers() {
+        let a = [1u64, 2, 3, 4];
+        let b = [0u64, 1, 2, 9, 4];
+        // b is a delayed by one; b[3] should be a[2] == 3 but is 9.
+        let c = compare_offset(&a, &b, 1);
+        assert_eq!(c.first_divergence, Some(2));
+    }
+
+    #[test]
+    fn the_offset_is_measured_from_the_stamps() {
+        const PERIOD: u64 = 20_480;
+        // Same epoch: zero frames apart.
+        assert_eq!(whole_frame_offset(&[20_480], &[20_480], PERIOD), Some(0));
+        // A sub-frame lead is still zero frames -- the core starts 336 cycles
+        // late and that must not read as a shift.
+        assert_eq!(whole_frame_offset(&[20_480], &[20_816], PERIOD), Some(0));
+        // And a couple of cycles behind is zero, not minus one.
+        assert_eq!(whole_frame_offset(&[20_480], &[20_478], PERIOD), Some(0));
+        // A genuine frame of lead reads as one.
+        assert_eq!(whole_frame_offset(&[20_480], &[40_960], PERIOD), Some(1));
+        // Unstamped or empty: say nothing.
+        assert_eq!(whole_frame_offset(&[], &[20_480], PERIOD), None);
     }
 }
