@@ -91,16 +91,22 @@ impl Mame {
     /// Boot the set with no input at all and capture `frames` frames.
     pub fn capture(&self, corpus: &Path, frames: u32) -> Result<Vec<Vec<u8>>, String> {
         self.run_trace(corpus, &Trace::idle(frames as usize), frames)
+            .map(|(frames, _stamps)| frames)
     }
 
     /// Boot the set, drive it from `trace`, and capture `frames` frames as
-    /// canonical RGB24.
+    /// canonical RGB24, each with the emulated CPU cycle count it was taken at.
+    ///
+    /// The stamps are the second half of the pair, one per frame and index
+    /// aligned with the first. They exist because comparing frame *N* against
+    /// frame *N* assumes the two sides mean the same frame, and nothing
+    /// established that — see `harness.md` §12.
     pub fn run_trace(
         &self,
         corpus: &Path,
         trace: &Trace,
         frames: u32,
-    ) -> Result<Vec<Vec<u8>>, String> {
+    ) -> Result<(Vec<Vec<u8>>, Vec<u64>), String> {
         let rompath = self.rompath(corpus)?;
 
         // Fresh scratch every run: cfg and nvram persisting between runs is the
@@ -149,8 +155,49 @@ impl Mame {
         }
 
         self.check_dims(&raw)?;
+        let stamps = self.read_cycles(&raw, frames)?;
         let blob = std::fs::read(&raw).map_err(|e| format!("{}: {e}", raw.display()))?;
-        decode(&blob, frames)
+        let decoded = decode(&blob, frames)?;
+
+        // Visible under --nocapture: the deltas should read 20480 flat, which is
+        // what says the stamp means what it claims.
+        let deltas: Vec<u64> = stamps.windows(2).take(4).map(|w| w[1] - w[0]).collect();
+        eprintln!(
+            "mame cycles:      first {:?}, deltas {:?}",
+            &stamps[..stamps.len().min(4)],
+            deltas
+        );
+
+        Ok((decoded, stamps))
+    }
+
+    /// The per-frame cycle stamps the capture script wrote alongside the
+    /// pixels, one decimal per line.
+    ///
+    /// A count mismatch is an error rather than a truncation: a stamp stream
+    /// shorter than the frame stream would silently misdate every frame after
+    /// the gap, which is precisely the class of fault this campaign exists to
+    /// remove.
+    fn read_cycles(&self, raw: &Path, frames: u32) -> Result<Vec<u64>, String> {
+        let path = raw.with_extension("raw.cycles");
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let stamps: Vec<u64> = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                l.trim()
+                    .parse::<u64>()
+                    .map_err(|e| format!("{}: {l:?} is not a cycle count: {e}", path.display()))
+            })
+            .collect::<Result<_, _>>()?;
+        if stamps.len() != frames as usize {
+            return Err(format!(
+                "{}: {} cycle stamps for {frames} frames",
+                path.display(),
+                stamps.len()
+            ));
+        }
+        Ok(stamps)
     }
 
     /// The capture script records what geometry it saw; insist it is ours.
@@ -233,11 +280,11 @@ impl MameReference {
 
 impl Reference for MameReference {
     fn run(&mut self, trace: &Trace, frames: u32, want_pixels: bool) -> Result<Vec<Frame>, String> {
-        Ok(self
-            .mame
-            .run_trace(&self.corpus, trace, frames)?
+        let (pictures, stamps) = self.mame.run_trace(&self.corpus, trace, frames)?;
+        Ok(pictures
             .into_iter()
-            .map(|rgb| Frame::new(rgb, want_pixels))
+            .zip(stamps)
+            .map(|(rgb, cycles)| Frame::new(rgb, want_pixels).at(cycles))
             .collect())
     }
 }

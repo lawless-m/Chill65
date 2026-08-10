@@ -9,6 +9,19 @@
 --
 -- Writes a sidecar "<out>.dims" holding "<width> <height>", so the Rust side
 -- can check the geometry it was given rather than assuming it.
+--
+-- Writes a second sidecar "<out>.cycles", one decimal per captured frame: the
+-- emulated CPU cycle count at the instant that frame was taken. The harness
+-- compares frame N against frame N, which assumes the two sides mean the same
+-- frame; nothing established that (harness.md §12), so every frame is dated
+-- and the offset becomes a measurement.
+--
+-- MAME 0.276's Lua has no cycle counter on the CPU device -- `total_cycles()`,
+-- `cycles_remaining()`, `.clock` and `.clockscale` are all absent. What it does
+-- have is machine time as an attotime, and `as_ticks` converts that to any
+-- frequency in exact integer arithmetic. At the 1.25 MHz CPU clock the count
+-- rises by exactly 20480 a frame, which is `CYCLES_PER_FRAME`. Integers, so it
+-- cannot drift over a long trace the way `as_double()` would.
 
 local out_path = assert(os.getenv("CHILL65_MAME_OUT"), "CHILL65_MAME_OUT unset")
 
@@ -70,7 +83,13 @@ local function apply(frame)
     trackball_y:set_value(entry[3])
 end
 
+-- The CPU clock, and so the unit every cycle stamp is expressed in.
+-- 1,250,000 Hz over 61.035 frames a second is 20,480 cycles a frame; see the
+-- clock chain in crates/chill65-runtime/src/frame.rs.
+local CPU_HZ = 1250000
+
 local out = assert(io.open(out_path, "wb"))
+local cycles_out = assert(io.open(out_path .. ".cycles", "w"))
 local seen = 0
 
 apply(0)
@@ -83,9 +102,13 @@ notifier = emu.add_machine_frame_notifier(function()
     -- Parenthesised deliberately: pixels() returns (data, width, height), and
     -- write() would happily append "256232" to every frame.
     out:write((screen:pixels()))
+    -- Dated in the same callback as the pixels, so stamp k and frame k are the
+    -- same instant rather than merely the same frame number.
+    cycles_out:write(string.format("%d\n", manager.machine.time:as_ticks(CPU_HZ)))
     seen = seen + 1
     if seen >= want then
         out:close()
+        cycles_out:close()
         manager.machine:exit()
     else
         apply(seen)
