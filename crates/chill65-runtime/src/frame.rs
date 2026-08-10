@@ -94,6 +94,72 @@ pub struct FrameStats {
     pub irqs_taken: u32,
     /// Times IRQ was raised — always 4, by construction.
     pub irqs_raised: u32,
+    /// Instructions executed by the interpreter, one per [`Cpu::step`].
+    ///
+    /// Paired with a [`Compiled`] dispatch's own count, this is the
+    /// denominator of "how much of the running code is compiled" — and
+    /// executed instructions are the honest unit, since they weight a routine
+    /// by how much it actually runs rather than by how much of it exists.
+    pub interpreted: u64,
+}
+
+/// Compiled routines, sharing the interpreter's machine state.
+///
+/// Plan §5's creep line: routines migrate from interpreter to compiled one at a
+/// time, both running against one `Machine`, so the game works throughout and
+/// the blast radius of any bug is a single routine.
+///
+/// # The contract emitted code must honour
+///
+/// [`Compiled::enter`] is offered the machine at an instruction boundary and
+/// returns `true` if it executed anything. Everything below is what generated
+/// code has to do to be indistinguishable from the interpreter:
+///
+/// - **Whole instructions only.** Never stop half way through one.
+/// - **Check the same two conditions the interpreter's loop checks, before
+///   every instruction:** `machine.cycles < deadline`, and stop if
+///   `machine.irq_pending && !cpu.interrupt_disable`.
+/// - **Yield with `cpu.pc` on the next unexecuted instruction.** When either
+///   condition fails, set `pc` and return. The interpreter then takes the IRQ
+///   and executes the rest of the routine itself. That is always safe because
+///   dispatch is offered only at routine *entries*: a half-run routine is
+///   finished by the interpreter, never re-entered from the top.
+/// - **Call `machine.begin_instruction(pc)` before each instruction**, so the
+///   write log keeps attributing bitmap writes to the right address and
+///   `chill65-diff`'s localisation keeps working on compiled code.
+/// - **Apply exact 6502 semantics and tick exact cycles**, page-crossing and
+///   branch-taken penalties included. A frame is 256 lines of cycle deadlines
+///   and the game is written against them; a routine that runs "fast" changes
+///   when interrupts land.
+/// - **`JSR`/`JMP` leaving the routine, and `RTS`/`RTI`, set `pc` and return.**
+///   Control transfer out is a yield, and the dispatch gets another chance at
+///   the destination.
+///
+/// A routine that follows all of that produces the same machine state, the same
+/// cycle count and the same picture as interpreting it — which is exactly what
+/// `ccnative verify` checks over the trace corpus.
+pub trait Compiled {
+    /// Run a compiled routine if one starts at `cpu.pc`. `true` if anything ran.
+    fn enter(&mut self, cpu: &mut Cpu, machine: &mut Machine, deadline: u64) -> bool;
+
+    /// Instructions executed by compiled code since the machine started.
+    fn compiled_instructions(&self) -> u64;
+}
+
+/// A dispatch that compiles nothing — the interpreter alone.
+///
+/// `run_frame_with(.., &mut NoCompiled)` is `run_frame`, which is what makes
+/// the two directly comparable.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoCompiled;
+
+impl Compiled for NoCompiled {
+    fn enter(&mut self, _cpu: &mut Cpu, _machine: &mut Machine, _deadline: u64) -> bool {
+        false
+    }
+    fn compiled_instructions(&self) -> u64 {
+        0
+    }
 }
 
 /// Run one frame: 256 scanlines, raising IRQ at the four line boundaries the
@@ -135,6 +201,53 @@ pub fn run_frame(cpu: &mut Cpu, machine: &mut Machine) -> Result<FrameStats, Cpu
                 continue;
             }
             cpu.step(machine)?;
+            stats.interpreted += 1;
+        }
+    }
+
+    stats.cycles = machine.cycles - start;
+    Ok(stats)
+}
+
+/// [`run_frame`], but offering each instruction boundary to `compiled` first.
+///
+/// The loop is deliberately the same shape: the dispatch is consulted where the
+/// interpreter would have stepped, and everything else — the interrupt schedule,
+/// the per-line deadlines, VBLANK tracking — is untouched. With
+/// [`NoCompiled`] this is `run_frame` exactly.
+pub fn run_frame_with(
+    cpu: &mut Cpu,
+    machine: &mut Machine,
+    compiled: &mut impl Compiled,
+) -> Result<FrameStats, CpuError> {
+    let start = machine.cycles;
+    let mut stats = FrameStats::default();
+
+    machine.input.latch_frame();
+
+    for line in 0..LINES_PER_FRAME {
+        machine.input.vblank = line < FIRST_VISIBLE_LINE;
+
+        if line % IRQ_LINE_INTERVAL == 0 {
+            machine.irq_pending = true;
+            stats.irqs_raised += 1;
+        }
+
+        let deadline = start + ((line + 1) as u64) * CYCLES_PER_LINE as u64;
+        while machine.cycles < deadline {
+            if machine.irq_pending && !cpu.interrupt_disable {
+                cpu.irq(machine);
+                stats.irqs_taken += 1;
+                continue;
+            }
+            // Offered at an instruction boundary, with the interrupt already
+            // handled — so a compiled routine never has to consider taking one,
+            // only yielding when one is pending.
+            if compiled.enter(cpu, machine, deadline) {
+                continue;
+            }
+            cpu.step(machine)?;
+            stats.interpreted += 1;
         }
     }
 
@@ -146,6 +259,132 @@ pub fn run_frame(cpu: &mut Cpu, machine: &mut Machine) -> Result<FrameStats, Cpu
 mod tests {
     use super::*;
     use crate::bus::Bus;
+
+    /// A hand-written stand-in for generated code: the spin loop at `E000`.
+    ///
+    /// `E000` is `JMP $E000`, three cycles, leaving `pc` where it was. It obeys
+    /// the [`Compiled`] contract literally — deadline and IRQ checked before
+    /// every instruction, `begin_instruction` called, exact cycles ticked — so
+    /// it stands in for what the emitter will produce.
+    struct CompiledSpin {
+        executed: u64,
+    }
+
+    impl Compiled for CompiledSpin {
+        fn enter(&mut self, cpu: &mut Cpu, machine: &mut Machine, deadline: u64) -> bool {
+            if cpu.pc != 0xE000 {
+                return false;
+            }
+            let mut ran = false;
+            loop {
+                // Exactly the two conditions the interpreter's loop checks.
+                if machine.cycles >= deadline {
+                    break;
+                }
+                if machine.irq_pending && !cpu.interrupt_disable {
+                    break;
+                }
+                machine.begin_instruction(0xE000);
+                machine.tick(3);
+                cpu.pc = 0xE000;
+                self.executed += 1;
+                ran = true;
+            }
+            ran
+        }
+
+        fn compiled_instructions(&self) -> u64 {
+            self.executed
+        }
+    }
+
+    #[test]
+    fn dispatching_a_routine_matches_interpreting_it() {
+        // The whole creep line rests on this: a compiled routine and the
+        // interpreter must be indistinguishable in state and in cycles.
+        // Interrupts enabled on both sides, so the run really does mix the two:
+        // the spin loop dispatches, the ISR stays interpreted. Reset leaves `I`
+        // set, as the hardware does, and the spin loop never clears it.
+        let (mut cpu_a, mut m_a) = machine_with_isr();
+        cpu_a.reset(&mut m_a);
+        cpu_a.interrupt_disable = false;
+        let interpreted = run_frame(&mut cpu_a, &mut m_a).expect("interpreted frame");
+
+        let (mut cpu_b, mut m_b) = machine_with_isr();
+        cpu_b.reset(&mut m_b);
+        cpu_b.interrupt_disable = false;
+        let mut compiled = CompiledSpin { executed: 0 };
+        let dispatched =
+            run_frame_with(&mut cpu_b, &mut m_b, &mut compiled).expect("dispatched frame");
+
+        assert_eq!(interpreted.cycles, dispatched.cycles, "cycle counts differ");
+        assert_eq!(
+            interpreted.irqs_taken, dispatched.irqs_taken,
+            "interrupts taken differ"
+        );
+        assert_eq!(interpreted.irqs_raised, dispatched.irqs_raised);
+        assert_eq!(m_a.cycles, m_b.cycles);
+        assert_eq!(m_a.frame_hash(), m_b.frame_hash(), "pictures differ");
+        assert_eq!(cpu_a.pc, cpu_b.pc, "the CPU ended somewhere else");
+        assert_eq!(cpu_a.a, cpu_b.a);
+        assert_eq!(cpu_a.s, cpu_b.s, "stack pointer");
+
+        // And the work really did move: the spin loop ran compiled, the ISR
+        // stayed interpreted.
+        assert!(compiled.compiled_instructions() > 0, "nothing was dispatched");
+        assert!(dispatched.interpreted > 0, "the ISR should still interpret");
+        assert!(
+            dispatched.interpreted < interpreted.interpreted,
+            "dispatching should have taken work off the interpreter: {} vs {}",
+            dispatched.interpreted,
+            interpreted.interpreted
+        );
+    }
+
+    #[test]
+    fn a_compiled_routine_yields_so_the_interrupt_can_be_taken() {
+        // A routine that ran past a pending IRQ would delay every interrupt in
+        // the frame, and the game is written against when they land.
+        let (mut cpu, mut m) = machine_with_isr();
+        cpu.reset(&mut m);
+        let mut compiled = CompiledSpin { executed: 0 };
+
+        m.irq_pending = true;
+        cpu.interrupt_disable = false;
+        let before = m.cycles;
+        let ran = compiled.enter(&mut cpu, &mut m, before + 10_000);
+
+        assert!(!ran, "the routine ran with an interrupt pending");
+        assert_eq!(m.cycles, before, "and it consumed cycles doing so");
+    }
+
+    #[test]
+    fn a_compiled_routine_stops_at_the_deadline() {
+        let (mut cpu, mut m) = machine_with_isr();
+        cpu.reset(&mut m);
+        let mut compiled = CompiledSpin { executed: 0 };
+
+        let deadline = m.cycles + 30;
+        assert!(compiled.enter(&mut cpu, &mut m, deadline));
+        assert!(
+            m.cycles >= deadline && m.cycles < deadline + 3,
+            "overran the deadline by more than one instruction: {} vs {deadline}",
+            m.cycles
+        );
+        assert_eq!(cpu.pc, 0xE000, "pc must sit on the next unexecuted instruction");
+    }
+
+    #[test]
+    fn no_compiled_is_exactly_the_interpreter() {
+        let (mut cpu_a, mut m_a) = machine_with_isr();
+        let a = run_frame(&mut cpu_a, &mut m_a).expect("frame");
+        let (mut cpu_b, mut m_b) = machine_with_isr();
+        let b = run_frame_with(&mut cpu_b, &mut m_b, &mut NoCompiled).expect("frame");
+        assert_eq!(a.cycles, b.cycles);
+        assert_eq!(a.interpreted, b.interpreted);
+        assert_eq!(a.irqs_taken, b.irqs_taken);
+        assert_eq!(m_a.frame_hash(), m_b.frame_hash());
+    }
 
     /// Build a machine whose ROM contains a spin loop at the reset vector and a
     /// realistic interrupt handler: acknowledge, then return.

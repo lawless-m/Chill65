@@ -1,7 +1,7 @@
 //! Our own runtime as a [`Reference`] — the first implementation of the seam,
 //! and the one every other oracle is compared against.
 
-use chill65_runtime::frame::run_frame;
+use chill65_runtime::frame::{run_frame_with, Compiled, NoCompiled};
 use chill65_runtime::{Cpu, Machine};
 
 use crate::reference::{rgb_from_indices, Frame, Reference};
@@ -27,6 +27,10 @@ pub struct Playback {
     pub hashes: Vec<u64>,
     pub cycles: u64,
     pub watchdog_expired: bool,
+    /// Instructions the interpreter executed.
+    pub interpreted: u64,
+    /// Instructions compiled routines executed. Zero without a dispatch.
+    pub compiled: u64,
 }
 
 /// The Crystal Castles machine model, driven from a trace.
@@ -49,8 +53,24 @@ impl OurRuntime {
         trace: &Trace,
         frames: u32,
         log_writes: bool,
-        mut per_frame: impl FnMut(&Machine),
+        per_frame: impl FnMut(&Machine),
     ) -> Result<Machine, String> {
+        self.drive_with(trace, frames, log_writes, &mut NoCompiled, per_frame)
+            .map(|(m, _)| m)
+    }
+
+    /// As [`OurRuntime::drive`], but offering each instruction boundary to a
+    /// [`Compiled`] dispatch. With [`NoCompiled`] the two are identical, which
+    /// is what makes a migrated routine checkable: run the same trace both ways
+    /// and the hash streams must match.
+    fn drive_with(
+        &self,
+        trace: &Trace,
+        frames: u32,
+        log_writes: bool,
+        compiled: &mut impl Compiled,
+        mut per_frame: impl FnMut(&Machine),
+    ) -> Result<(Machine, u64), String> {
         let mut machine = Machine::new();
         machine.load_roms(&self.prog, &self.data)?;
         if log_writes {
@@ -58,6 +78,7 @@ impl OurRuntime {
         }
         let mut cpu = Cpu::new();
         cpu.reset(&mut machine);
+        let mut interpreted = 0u64;
 
         for k in 0..frames {
             let input = trace
@@ -77,24 +98,37 @@ impl OurRuntime {
 
             // `run_frame` latches the accumulated movement itself, once, at the
             // frame boundary (frame.rs:115).
-            run_frame(&mut cpu, &mut machine)
+            let stats = run_frame_with(&mut cpu, &mut machine, compiled)
                 .map_err(|e| format!("{e} at frame {k}, PC {:04X}", cpu.pc))?;
+            interpreted += stats.interpreted;
 
             per_frame(&machine);
         }
-        Ok(machine)
+        Ok((machine, interpreted))
     }
 
     /// Play a whole trace, reporting the hash stream and the machine's health.
     pub fn play(&mut self, trace: &Trace, frames: u32) -> Result<Playback, String> {
+        self.play_with(trace, frames, &mut NoCompiled)
+    }
+
+    /// Play a whole trace with a compiled dispatch in place.
+    pub fn play_with(
+        &mut self,
+        trace: &Trace,
+        frames: u32,
+        compiled: &mut impl Compiled,
+    ) -> Result<Playback, String> {
         let mut hashes = Vec::with_capacity(frames as usize);
-        let machine = self.drive(trace, frames, false, |m| {
+        let (machine, interpreted) = self.drive_with(trace, frames, false, compiled, |m| {
             hashes.push(Frame::new(rgb_from_indices(&m.framebuffer(), &m.video.cram), false).hash);
         })?;
         Ok(Playback {
             hashes,
             cycles: machine.cycles,
             watchdog_expired: machine.watchdog_expired,
+            interpreted,
+            compiled: compiled.compiled_instructions(),
         })
     }
 

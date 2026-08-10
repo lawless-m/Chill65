@@ -41,7 +41,7 @@ pub mod video;
 pub use addr::{Mode, Operand};
 pub use bus::{Bus, FlatBus};
 pub use cpu::{Cpu, CpuError};
-pub use frame::{run_frame, FrameStats};
+pub use frame::{run_frame, run_frame_with, Compiled, FrameStats, NoCompiled};
 pub use input::{Input, Switch};
 pub use machine::Machine;
 pub use pokey::Pokey;
