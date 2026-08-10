@@ -289,10 +289,74 @@ impl Video {
 /// last term, and `A3:A0` pass `BIT[3:0]` straight through. So the address is
 /// `{1, pixel}`: **entries 16–31**.
 ///
-/// Motion objects are not modelled at all, so the arbitration above is not
-/// implemented. If an extracted picture ever comes out in the wrong colours,
-/// this constant is the first thing to doubt.
+/// The arbitration above is now implemented in full, as [`cram_address`]; this
+/// constant remains the answer for the `MV = 3'b111` case it describes.
 pub const BITMAP_CRAM_BASE: usize = 16;
+
+/// The colour RAM address a pixel selects, arbitrated between the bitmap and
+/// the motion objects.
+///
+/// Transcribed from `ColorMemory.v:16-21` — the `sel`, `A4` and `A3:A0`
+/// equations, in that form deliberately, so the transcription can be checked
+/// against the Verilog line by line rather than against a paraphrase of it.
+///
+/// - `mv` is the motion-object colour `MV[2:0]`. **7 is the "no object here"
+///   encoding**, not a colour.
+/// - `mpi` is `MPI`, the motion-object priority bit.
+/// - `bit` is the bitmap pixel `BIT[3:0]`.
+///
+/// # The three regimes, and the exception in the third
+///
+/// Enumerating all 256 inputs gives:
+///
+/// - **`mv == 7`** — the bitmap always wins, at `BITMAP_CRAM_BASE + bit`,
+///   whatever `mpi` is. Every `sel` term contains some `~MV[i]`, so `sel`
+///   collapses to 0 and `A3:A0` pass the bitmap pixel through, while `A4` is
+///   driven high by its last term.
+/// - **`mv < 7` with `mpi` clear, or with `BIT[3]` clear** — the object wins,
+///   at `{0, mpi, mv}`: entries 0–15.
+/// - **`mv` in 1..=6 with `mpi` set and `BIT[3]` set** — the bitmap wins.
+///   `MPI` is therefore a *behind-bright-bitmap* priority: an object with it
+///   set hides behind bitmap pixels 8–15.
+///
+/// **`mv == 0` is an exception to that last rule and still wins**, at address
+/// 8. The first `sel` term is `(~MV[2] & ~MV[1] & ~MV[0])`, true only for
+/// `mv == 0`, and it forces `sel` regardless of `mpi` and `BIT[3]`. So motion
+/// colour 0 is opaque even against a priority-set bright bitmap pixel. That
+/// falls out of the equations rather than being a special case anyone wrote,
+/// and the exhaustive test pins it.
+pub fn cram_address(mv: u8, mpi: bool, bit: u8) -> usize {
+    debug_assert!(mv < 8, "MV is three bits");
+    debug_assert!(bit < 16, "BIT is four bits");
+
+    let mv2 = mv & 0b100 != 0;
+    let mv1 = mv & 0b010 != 0;
+    let mv0 = mv & 0b001 != 0;
+    let bit3 = bit & 0b1000 != 0;
+
+    let sel = (!mv2 && !mv1 && !mv0)
+        || (!mv2 && !mpi)
+        || (!mv2 && !bit3)
+        || (!mv1 && !mpi)
+        || (!mv1 && !bit3)
+        || (!mv0 && !mpi)
+        || (!mv0 && !bit3);
+
+    let a4 = (mv0 && mpi && bit3)
+        || (mv1 && mpi && bit3)
+        || (mv2 && mpi && bit3)
+        || (mv2 && mv1 && mv0);
+    let a3 = if sel { mpi } else { bit3 };
+    let a2 = if sel { mv2 } else { bit & 0b0100 != 0 };
+    let a1 = if sel { mv1 } else { bit & 0b0010 != 0 };
+    let a0 = if sel { mv0 } else { bit & 0b0001 != 0 };
+
+    (usize::from(a4) << 4)
+        | (usize::from(a3) << 3)
+        | (usize::from(a2) << 2)
+        | (usize::from(a1) << 1)
+        | usize::from(a0)
+}
 
 /// Decode a stored colour RAM entry to 8-bit-per-channel RGB.
 ///
@@ -555,5 +619,101 @@ mod tests {
         assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(fnv1a(b"foobar"), 0x8594_4171_f739_67e8);
+    }
+
+    /// The arbitration, against an independent re-evaluation of the Verilog.
+    ///
+    /// The reference below is written with integer bit operations where
+    /// `cram_address` uses booleans, so a transcription slip in one is unlikely
+    /// to be repeated in the other. All 8 x 2 x 16 inputs are enumerated:
+    /// there is no sampling to get lucky with.
+    #[test]
+    fn the_arbitration_matches_the_verilog_on_all_256_inputs() {
+        fn verilog(mv: u8, mpi: u8, bit: u8) -> usize {
+            let (mv2, mv1, mv0) = ((mv >> 2) & 1, (mv >> 1) & 1, mv & 1);
+            let (b3, b2, b1, b0) = ((bit >> 3) & 1, (bit >> 2) & 1, (bit >> 1) & 1, bit & 1);
+            let n = |x: u8| x ^ 1;
+            let sel = (n(mv2) & n(mv1) & n(mv0))
+                | (n(mv2) & n(mpi))
+                | (n(mv2) & n(b3))
+                | (n(mv1) & n(mpi))
+                | (n(mv1) & n(b3))
+                | (n(mv0) & n(mpi))
+                | (n(mv0) & n(b3));
+            let a4 = (mv0 & mpi & b3) | (mv1 & mpi & b3) | (mv2 & mpi & b3) | (mv2 & mv1 & mv0);
+            let pick = |s: u8, t: u8| if sel != 0 { s } else { t };
+            let addr = (a4 << 4)
+                | (pick(mpi, b3) << 3)
+                | (pick(mv2, b2) << 2)
+                | (pick(mv1, b1) << 1)
+                | pick(mv0, b0);
+            addr as usize
+        }
+
+        for mv in 0..8u8 {
+            for mpi in 0..2u8 {
+                for bit in 0..16u8 {
+                    assert_eq!(
+                        cram_address(mv, mpi != 0, bit),
+                        verilog(mv, mpi, bit),
+                        "mv={mv} mpi={mpi} bit={bit}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `MV = 3'b111` is the no-object encoding, and the bitmap always wins.
+    /// This is the `BITMAP_CRAM_BASE` derivation becoming live code.
+    #[test]
+    fn no_object_leaves_the_bitmap_alone() {
+        for mpi in [false, true] {
+            for bit in 0..16u8 {
+                assert_eq!(
+                    cram_address(7, mpi, bit),
+                    BITMAP_CRAM_BASE + bit as usize,
+                    "mv=7 mpi={mpi} bit={bit}"
+                );
+            }
+        }
+    }
+
+    /// Without priority, or over a dim bitmap pixel, the object wins and lands
+    /// in entries 0-15 at `{0, mpi, mv}`.
+    #[test]
+    fn an_object_wins_unless_priority_meets_a_bright_bitmap_pixel() {
+        for mv in 0..7u8 {
+            // Priority clear: the object wins over any bitmap pixel.
+            for bit in 0..16u8 {
+                assert_eq!(cram_address(mv, false, bit), mv as usize, "mv={mv} bit={bit}");
+            }
+            // Priority set, but BIT[3] clear: still the object, now at 8 + mv.
+            for bit in 0..8u8 {
+                assert_eq!(cram_address(mv, true, bit), 8 + mv as usize, "mv={mv} bit={bit}");
+            }
+        }
+    }
+
+    /// With priority set over a bright bitmap pixel the bitmap wins — so `MPI`
+    /// means *behind bright bitmap*. Colour 0 is the exception: the first
+    /// `sel` term is true only for `mv == 0` and forces the object through.
+    #[test]
+    fn priority_hides_an_object_behind_a_bright_pixel_except_colour_zero() {
+        for mv in 1..7u8 {
+            for bit in 8..16u8 {
+                assert_eq!(
+                    cram_address(mv, true, bit),
+                    BITMAP_CRAM_BASE + bit as usize,
+                    "mv={mv} bit={bit} should let the bitmap through"
+                );
+            }
+        }
+        for bit in 8..16u8 {
+            assert_eq!(
+                cram_address(0, true, bit),
+                8,
+                "motion colour 0 is opaque even against a priority-set bright pixel"
+            );
+        }
     }
 }
