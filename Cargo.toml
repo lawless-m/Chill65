@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/chill65-asm", "crates/chill65-runtime", "crates/chill65-diff", "crates/chill65-native"]
+members = [
+    "crates/chill65-asm",
+    "crates/chill65-runtime",
+    "crates/chill65-diff",
+    "crates/chill65-native",
+    "crates/chill65-wasm",
+]
 
 [workspace.package]
 edition = "2021"

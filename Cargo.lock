@@ -25,3 +25,11 @@ dependencies = [
 [[package]]
 name = "chill65-runtime"
 version = "0.1.0"
+
+[[package]]
+name = "chill65-wasm"
+version = "0.1.0"
+dependencies = [
+ "chill65-native",
+ "chill65-runtime",
+]
