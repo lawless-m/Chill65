@@ -13,7 +13,7 @@ own colour RAM. No game code or ROMs are distributed here; see below.*
 
 ## Status
 
-**Phases 0, 1 and 2 complete and gated.**
+**Phases 0, 1, 2 and 3 complete and gated.**
 
 **Phase 1 — the assembler.** `chill65-asm` reassembles the original Atari source
 to output byte-identical with the original toolchain's own: 24,576 bytes of
@@ -53,8 +53,32 @@ cargo run -p chill65-runtime --bin ccrun -- prog.bin data.bin \
 Attract mode is deterministic — identical frame hash across independent runs,
 which Phase 3's differential harness depends on.
 
-**Phase 3** (a differential harness against MAME) is not started. The plan is
-emphatic that it be built *before* the code emitter.
+**Phase 3 — the differential harness.** `chill65-diff` drives our runtime and
+two independent external implementations from identical recorded input, and
+reports where they first disagree and which routine drew the difference.
+
+```
+CHILL65_CORPUS=/path/to/crystal-castles \
+  cargo test -p chill65-diff -- --ignored --nocapture
+```
+
+It is gated on the machinery working, not on agreement — divergence against an
+external oracle is the output, since six hardware claims remain unverified and
+motion objects are unmodelled. Given a fault injected in a known place, it finds
+the frame and names the routine, twice running:
+
+```
+clean vs clean:  identical over 600 frames
+clean vs faulty: diverged at frame 419: LN.F1 [CRF.MAC] (85 pixels), ...
+```
+
+Both external oracles run for real. MAME 0.276 boots a `ccastles3` ROM set
+**rebuilt entirely from the game source** — all eleven devices matching MAME's
+own CRC-32, confirmed by `mame -verifyroms`, with nothing downloaded — and the
+MiSTer FPGA core is verilated unmodified as a second reference.
+
+Its first finding is that our colour RAM powers on white where both oracles power
+on black; see `gate3.md`.
 
 Windowing and audio are deliberately out of scope; the core stays headless and
 dependency-free.
@@ -73,6 +97,8 @@ See `atari-recompiler-plan.md` for the full plan, and:
 | `dialect.md` | The assembler dialect as implemented, and what is deliberately not |
 | `codegen-readiness.md` | Open question O3 measured: 64.4% structured control flow |
 | `gate2.md` | The Phase 2 gate: Phase 1 unregressed, the game's own self-test passing, attract mode deterministic |
+| `harness.md` | **The Phase 3 deliverable.** The harness: trace format, oracle seam, routine attribution, the ROM-set reconstruction, and both external oracles |
+| `gate3.md` | The Phase 3 gate: fault injection localised to its frame and routine, and what the harness found |
 | `LOOP.md` | Working scope and stop conditions |
 
 ## You must supply your own game source
@@ -99,6 +125,8 @@ git clone https://github.com/MiSTer-devel/Arcade-CrystalCastles_MiSTer
 ```
 crates/chill65-asm/       assembler front end for the Atari MACRO-11 dialect
 crates/chill65-runtime/   6502 interpreter and Crystal Castles machine model
+crates/chill65-diff/      differential harness: traces, oracles, divergence localisation
+traces/                   recorded input traces (our own work, not game-derived)
 tools/                    Python analysis scripts (LDA decoder, source scanners)
 ```
 
