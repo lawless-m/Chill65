@@ -30,6 +30,35 @@ const FRAME_MS = 1000 / FRAME_HZ;
 // minutes of missed frames would hang the page for a minute.
 const MAX_CATCHUP_FRAMES = 4;
 
+// Mouse pixels to trackball counts.
+//
+// `hardware.md` lists this as UNVERIFIED: nothing establishes how a host's
+// pointer delta should map to the counts a real trackball produced, and the
+// board cannot tell us. Passing movement through 1:1 — which this did — makes
+// the game unplayably twitchy, so the factor is real and simply unmeasured.
+//
+// Adjustable at runtime with [ and ], because the honest way to fix an
+// unverified constant is to let someone find it by feel and then write the
+// number down. Remembered across reloads so two host devices can be compared
+// without retuning from scratch each time — a mouse and a real trackball need
+// not want the same number, and if they do not, the constant belongs to this
+// page rather than to the board.
+let trackballScale = Number(localStorage.getItem('chill65.scale')) || 0.35;
+
+// Scaling below 1 with truncation would drop every small movement and feel
+// dead, so the remainder is carried rather than discarded.
+let owedX = 0;
+let owedY = 0;
+
+// Which way vertical runs, toggled with Y.
+//
+// Also not merely a preference. `input.rs` records that `CCastles.v:292` wires
+// two trackball pairs whose roles are not established — a reversed axis would
+// show as inverted motion — and `harness.md` §11.6 says the same of the
+// quadrature phase. So this switch is a probe of an open question as much as a
+// comfort setting.
+let invertY = localStorage.getItem('chill65.invertY') === '1';
+
 // Switch ids, in the order `chill65-wasm`'s `set_switch` numbers them.
 const SWITCH = {
   Start1: 0,
@@ -111,13 +140,35 @@ async function main() {
 
   document.addEventListener('mousemove', (event) => {
     if (document.pointerLockElement !== canvas) return;
-    // Raw movement, unscaled. The trace convention is positive right and down,
-    // which is what the browser reports, so nothing is transformed here — if
-    // the game proves unplayable the factor belongs at this line, named.
-    wasm.add_trackball_delta(event.movementX, event.movementY);
+    // Positive right and down on both sides, so only the magnitude is scaled.
+    owedX += event.movementX * trackballScale;
+    owedY += event.movementY * trackballScale * (invertY ? -1 : 1);
+    const dx = Math.trunc(owedX);
+    const dy = Math.trunc(owedY);
+    owedX -= dx;
+    owedY -= dy;
+    if (dx !== 0 || dy !== 0) {
+      wasm.add_trackball_delta(dx, dy);
+    }
   });
 
   const key = (event, held) => {
+    // Trackball sensitivity, live.
+    if (held && (event.code === 'BracketLeft' || event.code === 'BracketRight')) {
+      const by = event.code === 'BracketRight' ? 1.25 : 0.8;
+      trackballScale = Math.min(4, Math.max(0.02, trackballScale * by));
+      localStorage.setItem('chill65.scale', String(trackballScale));
+      event.preventDefault();
+      return;
+    }
+    if (event.code === 'KeyY' && held) {
+      invertY = !invertY;
+      localStorage.setItem('chill65.invertY', invertY ? '1' : '0');
+      // Drop the carried remainder rather than let it push the other way.
+      owedY = 0;
+      event.preventDefault();
+      return;
+    }
     if (event.code === 'KeyD' && held) {
       dispatch = !dispatch;
       wasm.set_dispatch(dispatch ? 1 : 0);
@@ -173,9 +224,9 @@ async function main() {
     }
     say(
       `${shown} frames/sec of ${FRAME_HZ.toFixed(2)} — ` +
-      `${dispatch ? 'compiled dispatch on' : 'interpreting only'}, ` +
-      `${wasm.dispatch_entries()} dispatch entries — ` +
-      `${document.pointerLockElement === canvas ? 'trackball captured' : 'click to capture the trackball'}`,
+      `${dispatch ? 'compiled dispatch on' : 'interpreting only'} — ` +
+      `trackball x${trackballScale.toFixed(2)} ([ ]), Y ${invertY ? 'inverted' : 'normal'} (Y) — ` +
+      `${document.pointerLockElement === canvas ? 'captured, Esc to release' : 'click to capture'}`,
     );
   };
   requestAnimationFrame(tick);
