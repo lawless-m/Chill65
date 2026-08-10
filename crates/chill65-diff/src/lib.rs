@@ -22,18 +22,24 @@
 //! - [`diverge`] — comparing two per-frame hash streams, and their file form.
 //! - [`symbols`] — the assembler's symbol table, and naming an address.
 //! - [`localise`] — blaming the routine behind a divergence.
+//! - [`romset`] — rebuilding MAME's `ccastles3` set from the corpus, with
+//!   [`crc32`], [`zip`] and [`lda`] as its parts.
 //! - [`ours`] — our own runtime behind that seam.
 //! - [`images`] — assembling the ROM images to run, from the corpus.
 //!
 //! No third-party dependencies, matching the rest of the workspace.
 
+pub mod crc32;
 pub mod diverge;
 pub mod images;
+pub mod lda;
 pub mod localise;
 pub mod ours;
 pub mod reference;
+pub mod romset;
 pub mod symbols;
 pub mod trace;
+pub mod zip;
 
 pub use localise::{localise, Report};
 pub use ours::OurRuntime;
