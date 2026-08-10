@@ -81,88 +81,29 @@ impl Cpu {
             0x8C => self.store(bus, Mode::Absolute, self.y, 4),
 
             // ---- transfers ----
-            0xAA => {
-                self.x = self.a;
-                self.set_nz(self.x);
-                2
-            }
-            0xA8 => {
-                self.y = self.a;
-                self.set_nz(self.y);
-                2
-            }
-            0x8A => {
-                self.a = self.x;
-                self.set_nz(self.a);
-                2
-            }
-            0x98 => {
-                self.a = self.y;
-                self.set_nz(self.a);
-                2
-            }
-            0xBA => {
-                self.x = self.s;
-                self.set_nz(self.x);
-                2
-            }
+            0xAA => self.tax(),
+            0xA8 => self.tay(),
+            0x8A => self.txa(),
+            0x98 => self.tya(),
+            0xBA => self.tsx(),
             // TXS is the one transfer that does NOT touch the flags.
-            0x9A => {
-                self.s = self.x;
-                2
-            }
+            0x9A => self.txs(),
 
             // ---- stack ----
-            0x48 => {
-                self.push(bus, self.a);
-                3
-            }
-            0x68 => {
-                self.a = self.pull(bus);
-                self.set_nz(self.a);
-                4
-            }
+            0x48 => self.pha(bus),
+            0x68 => self.pla(bus),
             // PHP pushes with B set — B exists only in pushed copies.
-            0x08 => {
-                let p = self.p() | flag::BREAK;
-                self.push(bus, p);
-                3
-            }
-            0x28 => {
-                let p = self.pull(bus);
-                self.set_p(p);
-                4
-            }
+            0x08 => self.php(bus),
+            0x28 => self.plp(bus),
 
             // ---- flags ----
-            0x18 => {
-                self.carry = false;
-                2
-            }
-            0x38 => {
-                self.carry = true;
-                2
-            }
-            0x58 => {
-                self.interrupt_disable = false;
-                2
-            }
-            0x78 => {
-                self.interrupt_disable = true;
-                2
-            }
-            0xD8 => {
-                self.decimal = false;
-                2
-            }
-            0xF8 => {
-                self.decimal = true;
-                2
-            }
-            0xB8 => {
-                self.overflow = false;
-                2
-            }
+            0x18 => self.set_carry(false),
+            0x38 => self.set_carry(true),
+            0x58 => self.set_interrupt_disable(false),
+            0x78 => self.set_interrupt_disable(true),
+            0xD8 => self.set_decimal(false),
+            0xF8 => self.set_decimal(true),
+            0xB8 => self.clv(),
 
             // ---- bitwise ----
             0x29 => self.and(bus, Mode::Immediate, 2),
@@ -242,26 +183,10 @@ impl Cpu {
             0xCE => self.rmw(bus, Mode::Absolute, Op::Dec, 6),
             0xDE => self.rmw(bus, Mode::AbsoluteX, Op::Dec, 7),
 
-            0xE8 => {
-                self.x = self.x.wrapping_add(1);
-                self.set_nz(self.x);
-                2
-            }
-            0xC8 => {
-                self.y = self.y.wrapping_add(1);
-                self.set_nz(self.y);
-                2
-            }
-            0xCA => {
-                self.x = self.x.wrapping_sub(1);
-                self.set_nz(self.x);
-                2
-            }
-            0x88 => {
-                self.y = self.y.wrapping_sub(1);
-                self.set_nz(self.y);
-                2
-            }
+            0xE8 => self.inx(),
+            0xC8 => self.iny(),
+            0xCA => self.dex(),
+            0x88 => self.dey(),
 
             // ---- shifts and rotates ----
             0x0A => self.shift_a(Op::Asl),
@@ -297,46 +222,15 @@ impl Cpu {
             0x70 => self.branch(bus, self.overflow),
 
             // ---- jumps and subroutines ----
-            0x4C => {
-                self.pc = self.resolve(bus, Mode::Absolute).unwrap().addr;
-                3
-            }
-            0x6C => {
-                self.pc = self.resolve(bus, Mode::Indirect).unwrap().addr;
-                5
-            }
-            0x20 => {
-                let target = self.fetch_u16(bus);
-                // Pushes the address of the LAST byte of the JSR, not the
-                // return address — RTS adds one back.
-                let ret = self.pc.wrapping_sub(1);
-                self.push(bus, (ret >> 8) as u8);
-                self.push(bus, ret as u8);
-                self.pc = target;
-                6
-            }
-            0x60 => {
-                let lo = self.pull(bus) as u16;
-                let hi = self.pull(bus) as u16;
-                self.pc = ((hi << 8) | lo).wrapping_add(1);
-                6
-            }
+            0x4C => self.jmp_absolute(bus),
+            0x6C => self.jmp_indirect(bus),
+            0x20 => self.jsr(bus),
+            0x60 => self.rts(bus),
 
             // BRK is two bytes: the second is padding the processor skips.
-            0x00 => {
-                self.pc = self.pc.wrapping_add(1);
-                self.enter_interrupt(bus, crate::cpu::vector::IRQ, true);
-                7
-            }
+            0x00 => self.brk(bus),
             // RTI pulls PC exactly — unlike RTS it does not add one.
-            0x40 => {
-                let p = self.pull(bus);
-                self.set_p(p);
-                let lo = self.pull(bus) as u16;
-                let hi = self.pull(bus) as u16;
-                self.pc = (hi << 8) | lo;
-                6
-            }
+            0x40 => self.rti(bus),
 
             0xEA => 2, // NOP
 
@@ -354,60 +248,229 @@ impl Cpu {
     /// speculatively reads the wrong page first and re-reads. Indexed *writes*
     /// do not: they always pay the extra cycle, which is why `STA abs,X` is a
     /// flat 5 and needs no penalty.
-    fn operand_value(&mut self, bus: &mut impl Bus, mode: Mode) -> (u8, bool) {
+    // ---- Register transfers ----
+    //
+    // Every opcode's semantics lives in a named public function, so emitted
+    // Rust and the interpreter's decode loop run the *same* code. There is no
+    // second implementation to drift, which matters more here than anywhere:
+    // a compiled routine that set a flag differently would diverge from the
+    // interpreter in a way no test of the interpreter alone could catch.
+    //
+    // Each returns the instruction's cycle count, exactly as the match arms
+    // that call them used to.
+
+    pub fn tax(&mut self) -> u8 {
+        self.x = self.a;
+        self.set_nz(self.x);
+        2
+    }
+
+    pub fn tay(&mut self) -> u8 {
+        self.y = self.a;
+        self.set_nz(self.y);
+        2
+    }
+
+    pub fn txa(&mut self) -> u8 {
+        self.a = self.x;
+        self.set_nz(self.a);
+        2
+    }
+
+    pub fn tya(&mut self) -> u8 {
+        self.a = self.y;
+        self.set_nz(self.a);
+        2
+    }
+
+    pub fn tsx(&mut self) -> u8 {
+        self.x = self.s;
+        self.set_nz(self.x);
+        2
+    }
+
+    /// TXS is the one transfer that does **not** touch the flags.
+    pub fn txs(&mut self) -> u8 {
+        self.s = self.x;
+        2
+    }
+
+    // ---- Stack ----
+
+    pub fn pha(&mut self, bus: &mut impl Bus) -> u8 {
+        self.push(bus, self.a);
+        3
+    }
+
+    pub fn pla(&mut self, bus: &mut impl Bus) -> u8 {
+        self.a = self.pull(bus);
+        self.set_nz(self.a);
+        4
+    }
+
+    /// PHP pushes with B set — B exists only in pushed copies.
+    pub fn php(&mut self, bus: &mut impl Bus) -> u8 {
+        let p = self.p() | flag::BREAK;
+        self.push(bus, p);
+        3
+    }
+
+    pub fn plp(&mut self, bus: &mut impl Bus) -> u8 {
+        let p = self.pull(bus);
+        self.set_p(p);
+        4
+    }
+
+    // ---- Flags ----
+
+    pub fn set_carry(&mut self, v: bool) -> u8 {
+        self.carry = v;
+        2
+    }
+
+    pub fn set_interrupt_disable(&mut self, v: bool) -> u8 {
+        self.interrupt_disable = v;
+        2
+    }
+
+    pub fn set_decimal(&mut self, v: bool) -> u8 {
+        self.decimal = v;
+        2
+    }
+
+    /// CLV. There is no SEV: the 6502 can only clear overflow directly.
+    pub fn clv(&mut self) -> u8 {
+        self.overflow = false;
+        2
+    }
+
+    // ---- Index registers ----
+
+    pub fn inx(&mut self) -> u8 {
+        self.x = self.x.wrapping_add(1);
+        self.set_nz(self.x);
+        2
+    }
+
+    pub fn iny(&mut self) -> u8 {
+        self.y = self.y.wrapping_add(1);
+        self.set_nz(self.y);
+        2
+    }
+
+    pub fn dex(&mut self) -> u8 {
+        self.x = self.x.wrapping_sub(1);
+        self.set_nz(self.x);
+        2
+    }
+
+    pub fn dey(&mut self) -> u8 {
+        self.y = self.y.wrapping_sub(1);
+        self.set_nz(self.y);
+        2
+    }
+
+    // ---- Control transfer ----
+
+    pub fn jmp_absolute(&mut self, bus: &mut impl Bus) -> u8 {
+        self.pc = self.resolve(bus, Mode::Absolute).unwrap().addr;
+        3
+    }
+
+    pub fn jmp_indirect(&mut self, bus: &mut impl Bus) -> u8 {
+        self.pc = self.resolve(bus, Mode::Indirect).unwrap().addr;
+        5
+    }
+
+    pub fn jsr(&mut self, bus: &mut impl Bus) -> u8 {
+        let target = self.fetch_u16(bus);
+        // Pushes the address of the LAST byte of the JSR, not the return
+        // address — RTS adds one back.
+        let ret = self.pc.wrapping_sub(1);
+        self.push(bus, (ret >> 8) as u8);
+        self.push(bus, ret as u8);
+        self.pc = target;
+        6
+    }
+
+    pub fn rts(&mut self, bus: &mut impl Bus) -> u8 {
+        let lo = self.pull(bus) as u16;
+        let hi = self.pull(bus) as u16;
+        self.pc = ((hi << 8) | lo).wrapping_add(1);
+        6
+    }
+
+    /// BRK is two bytes: the second is padding the processor skips.
+    pub fn brk(&mut self, bus: &mut impl Bus) -> u8 {
+        self.pc = self.pc.wrapping_add(1);
+        self.enter_interrupt(bus, crate::cpu::vector::IRQ, true);
+        7
+    }
+
+    /// RTI pulls PC exactly — unlike RTS it does not add one.
+    pub fn rti(&mut self, bus: &mut impl Bus) -> u8 {
+        let p = self.pull(bus);
+        self.set_p(p);
+        let lo = self.pull(bus) as u16;
+        let hi = self.pull(bus) as u16;
+        self.pc = (hi << 8) | lo;
+        6
+    }
+
+    pub fn operand_value(&mut self, bus: &mut impl Bus, mode: Mode) -> (u8, bool) {
         let op = self.resolve(bus, mode).expect("mode has an address");
         (bus.read(op.addr), op.page_crossed)
     }
 
-    fn load_a(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
+    pub fn load_a(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
         let (v, crossed) = self.operand_value(bus, mode);
         self.a = v;
         self.set_nz(v);
         c + crossed as u8
     }
 
-    fn load_x(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
+    pub fn load_x(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
         let (v, crossed) = self.operand_value(bus, mode);
         self.x = v;
         self.set_nz(v);
         c + crossed as u8
     }
 
-    fn load_y(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
+    pub fn load_y(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
         let (v, crossed) = self.operand_value(bus, mode);
         self.y = v;
         self.set_nz(v);
         c + crossed as u8
     }
 
-    fn store(&mut self, bus: &mut impl Bus, mode: Mode, v: u8, c: u8) -> u8 {
+    pub fn store(&mut self, bus: &mut impl Bus, mode: Mode, v: u8, c: u8) -> u8 {
         let op = self.resolve(bus, mode).expect("mode has an address");
         bus.write(op.addr, v);
         c
     }
 
-    fn and(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
+    pub fn and(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
         let (v, crossed) = self.operand_value(bus, mode);
         self.a &= v;
         self.set_nz(self.a);
         c + crossed as u8
     }
 
-    fn ora(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
+    pub fn ora(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
         let (v, crossed) = self.operand_value(bus, mode);
         self.a |= v;
         self.set_nz(self.a);
         c + crossed as u8
     }
 
-    fn eor(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
+    pub fn eor(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
         let (v, crossed) = self.operand_value(bus, mode);
         self.a ^= v;
         self.set_nz(self.a);
         c + crossed as u8
     }
 
-    fn bit(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
+    pub fn bit(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
         let (v, _) = self.operand_value(bus, mode);
         self.zero = (self.a & v) == 0;
         self.negative = v & 0x80 != 0;
@@ -472,7 +535,10 @@ impl Cpu {
 
 /// Read-modify-write and accumulator operations that share flag handling.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Op {
+/// The read-modify-write and shift operations, shared by the accumulator and
+/// memory forms. Public because generated code calls [`Cpu::rmw`] and
+/// [`Cpu::shift_a`] directly.
+pub enum Op {
     Inc,
     Dec,
     Asl,
@@ -482,7 +548,7 @@ enum Op {
 }
 
 impl Cpu {
-    fn compare(&mut self, bus: &mut impl Bus, mode: Mode, reg: u8, c: u8) -> u8 {
+    pub fn compare(&mut self, bus: &mut impl Bus, mode: Mode, reg: u8, c: u8) -> u8 {
         let (v, crossed) = self.operand_value(bus, mode);
         let r = reg.wrapping_sub(v);
         // Carry is an unsigned "greater or equal"; there is no overflow flag.
@@ -491,7 +557,7 @@ impl Cpu {
         c + crossed as u8
     }
 
-    fn apply_op(&mut self, op: Op, v: u8) -> u8 {
+    pub fn apply_op(&mut self, op: Op, v: u8) -> u8 {
         match op {
             Op::Inc => v.wrapping_add(1),
             Op::Dec => v.wrapping_sub(1),
@@ -516,7 +582,7 @@ impl Cpu {
         }
     }
 
-    fn rmw(&mut self, bus: &mut impl Bus, mode: Mode, op: Op, c: u8) -> u8 {
+    pub fn rmw(&mut self, bus: &mut impl Bus, mode: Mode, op: Op, c: u8) -> u8 {
         let addr = self.resolve(bus, mode).expect("mode has an address").addr;
         let v = bus.read(addr);
         let r = self.apply_op(op, v);
@@ -525,7 +591,7 @@ impl Cpu {
         c
     }
 
-    fn shift_a(&mut self, op: Op) -> u8 {
+    pub fn shift_a(&mut self, op: Op) -> u8 {
         self.a = self.apply_op(op, self.a);
         self.set_nz(self.a);
         2
@@ -534,7 +600,7 @@ impl Cpu {
     /// Branches cost 2, +1 when taken, +1 more when the target is on another
     /// page. HLL65F's structured control flow emits one of these per construct,
     /// so their timing is most of the game's timing.
-    fn branch(&mut self, bus: &mut impl Bus, take: bool) -> u8 {
+    pub fn branch(&mut self, bus: &mut impl Bus, take: bool) -> u8 {
         let op = self.resolve(bus, Mode::Relative).expect("relative");
         if !take {
             return 2;
@@ -554,7 +620,7 @@ impl Cpu {
     /// from the intermediate before the high-nibble correction. The 65C02 fixed
     /// this; the 6502 in a 1983 coin-op did not, and `CCN.MAC`'s coin counting
     /// and `CAL.MAC`'s scoring both run with D set.
-    fn adc(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
+    pub fn adc(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
         let (m, crossed) = self.operand_value(bus, mode);
         let c = c + crossed as u8;
         let a = self.a;
@@ -595,7 +661,7 @@ impl Cpu {
     /// On NMOS **every** flag comes from the binary operation even in decimal
     /// mode — only the accumulator differs. That asymmetry with ADC is real
     /// hardware behaviour, not an oversight here.
-    fn sbc(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
+    pub fn sbc(&mut self, bus: &mut impl Bus, mode: Mode, c: u8) -> u8 {
         let (m, crossed) = self.operand_value(bus, mode);
         let c = c + crossed as u8;
         let a = self.a;
