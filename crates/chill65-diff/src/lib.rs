@@ -20,6 +20,8 @@
 //! - [`reference`] — the oracle seam and the canonical frame every
 //!   implementation is compared in.
 //! - [`diverge`] — comparing two per-frame hash streams, and their file form.
+//! - [`symbols`] — the assembler's symbol table, and naming an address.
+//! - [`localise`] — blaming the routine behind a divergence.
 //! - [`ours`] — our own runtime behind that seam.
 //! - [`images`] — assembling the ROM images to run, from the corpus.
 //!
@@ -27,10 +29,14 @@
 
 pub mod diverge;
 pub mod images;
+pub mod localise;
 pub mod ours;
 pub mod reference;
+pub mod symbols;
 pub mod trace;
 
+pub use localise::{localise, Report};
 pub use ours::OurRuntime;
+pub use symbols::Symbols;
 pub use reference::{Frame, Reference};
 pub use trace::{FrameInput, Switches, Trace, TraceError};
