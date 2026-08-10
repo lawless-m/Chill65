@@ -136,12 +136,18 @@ impl Pixel {
     };
 }
 
-/// Where the object table starts in SRAM, from `MT.BSL` — OUT1 bit 7.
+/// Bytes in one table half.
+pub const TABLE_HALF: usize = 0x100;
+
+/// Which half `MT.BSL` — OUT1 bit 7 — selects, as an offset into the pair.
+///
+/// The pair is `8E00-8FFF`, so offset 0 is the `MT.BSL = 0` table and
+/// [`TABLE_HALF`] the other.
 pub fn table_base(out1: u8) -> usize {
     if out1 & 0x80 != 0 {
-        0xF00
+        TABLE_HALF
     } else {
-        0xE00
+        0
     }
 }
 
@@ -150,20 +156,24 @@ pub fn table_base(out1: u8) -> usize {
 /// Returns the 256-pixel line buffer, which the hardware displays on line
 /// `vc + `[`DISPLAY_DELAY_LINES`].
 ///
-/// - `sram` is the machine's 4 KB SRAM, `8000-8FFF`.
+/// - `table` is the 512-byte object-table pair, `8E00-8FFF`.
 /// - `mob_rom` is 16384 bytes: `136022-106.8d` then `136022-107.8b`.
 /// - `out1` supplies `MT.BSL` (bit 7) and `PLAYER2` (bit 4).
-pub fn render_line(sram: &[u8], mob_rom: &[u8], out1: u8, vc: u8) -> [Pixel; WIDTH] {
+///
+/// The table is passed rather than read out of SRAM because **when** it is
+/// sampled matters: the game builds it and parks it again within the frame, so
+/// a copy taken at end of frame is empty. See `Machine::latch_motion_objects`.
+pub fn render_line(table: &[u8], mob_rom: &[u8], out1: u8, vc: u8) -> [Pixel; WIDTH] {
     let mut line = [Pixel::NONE; WIDTH];
     let base = table_base(out1);
     let player2 = out1 & 0x10 != 0;
 
     for slot in 0..OBJECTS {
         let entry = base + slot * OBJECT_BYTES;
-        let picture = sram[entry];
-        let vpos = sram[entry + 1];
-        let mpi = sram[entry + 2] & 0x80 != 0;
-        let hpos = sram[entry + 3];
+        let picture = table[entry];
+        let vpos = table[entry + 1];
+        let mpi = table[entry + 2] & 0x80 != 0;
+        let hpos = table[entry + 3];
 
         // MATCHn: on this line only while the sum's top nibble is all ones.
         let sum = vc.wrapping_add(vpos);
@@ -232,9 +242,9 @@ mod tests {
 
     /// One object in slot `slot` of the `MT.BSL = 0` table.
     fn sram_with(objects: &[(usize, u8, u8, bool, u8)]) -> Vec<u8> {
-        let mut sram = vec![0u8; 0x1000];
+        let mut sram = vec![0u8; 0x200];
         for &(slot, picture, vpos, mpi, hpos) in objects {
-            let e = 0xE00 + slot * OBJECT_BYTES;
+            let e = slot * OBJECT_BYTES;
             sram[e] = picture;
             sram[e + 1] = vpos;
             sram[e + 2] = if mpi { 0x80 } else { 0x00 };
@@ -327,9 +337,9 @@ mod tests {
     #[test]
     fn the_table_half_follows_out1_bit_seven() {
         let rom = rom_with(&[(1, 0, 0, [1, 7, 7, 7])]);
-        let mut sram = vec![0u8; 0x1000];
+        let mut sram = vec![0u8; 0x200];
         // An object in the MT.BSL=1 table only.
-        let e = 0xF00;
+        let e = TABLE_HALF;
         sram[e] = 1;
         sram[e + 1] = 0xF0;
         sram[e + 3] = 77;
@@ -396,7 +406,7 @@ mod tests {
     #[test]
     fn a_blank_table_draws_nothing() {
         let rom = rom_with(&[]);
-        let line = render_line(&vec![0u8; 0x1000], &rom, 0, 0);
+        let line = render_line(&vec![0u8; 0x200], &rom, 0, 0);
         assert!(line.iter().all(|p| *p == Pixel::NONE));
     }
 }

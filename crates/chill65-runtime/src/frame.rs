@@ -184,6 +184,12 @@ pub fn run_frame(cpu: &mut Cpu, machine: &mut Machine) -> Result<FrameStats, Cpu
         // VBLANK is bit 5 of the switch port and the game polls it, so it must
         // track the scanline (SyncChain.v:43 — high for lines 0-23).
         machine.input.vblank = line < FIRST_VISIBLE_LINE;
+        if line == FIRST_VISIBLE_LINE {
+            // The video hardware starts reading the object table here. The
+            // game parks the table again before the frame ends, so this is the
+            // only instant at which a snapshot of it means anything.
+            machine.latch_motion_objects();
+        }
 
         if line % IRQ_LINE_INTERVAL == 0 {
             // Rising edge of IRQCLK. Latched: if one is already pending and
@@ -227,6 +233,12 @@ pub fn run_frame_with(
 
     for line in 0..LINES_PER_FRAME {
         machine.input.vblank = line < FIRST_VISIBLE_LINE;
+        if line == FIRST_VISIBLE_LINE {
+            // The video hardware starts reading the object table here. The
+            // game parks the table again before the frame ends, so this is the
+            // only instant at which a snapshot of it means anything.
+            machine.latch_motion_objects();
+        }
 
         if line % IRQ_LINE_INTERVAL == 0 {
             machine.irq_pending = true;

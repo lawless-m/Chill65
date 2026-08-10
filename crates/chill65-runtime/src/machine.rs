@@ -78,6 +78,22 @@ pub struct Machine {
     /// why they arrive through their own loader rather than through
     /// [`Machine::load_roms`].
     pub mob_rom: Box<[u8; 0x4000]>,
+    /// The object table, copied at the instant the visible field begins, and
+    /// the `OUT1` latch as it stood then.
+    ///
+    /// **Not read live from SRAM, and this is the whole point.** The game
+    /// builds the table during vertical blank, the video hardware reads it as
+    /// the field is scanned, and the game parks it again — every entry `F0` —
+    /// before the frame ends. A model that composites from SRAM at the end of a
+    /// frame therefore sees an empty table and draws nothing, which is exactly
+    /// what it did. Measured on `gameplay.trace` frame 600: both halves read
+    /// `F0 F0 F0 F0` throughout while MAME was drawing four characters.
+    ///
+    /// So the table is latched where the hardware starts using it, at the end
+    /// of vertical blank. [`crate::frame::FIRST_VISIBLE_LINE`].
+    pub mob_table: Box<[u8; 0x200]>,
+    /// `OUT1` at the same instant, for `MT.BSL` and `PLAYER2`.
+    pub mob_out1: u8,
     /// Whether [`Machine::load_motion_roms`] has been called.
     ///
     /// False means motion objects render as absent everywhere, so a machine
@@ -168,6 +184,8 @@ impl Machine {
             prog: Box::new([0; 0x6000]),
             data: Box::new([0; 0x4000]),
             mob_rom: Box::new([0; 0x4000]),
+            mob_table: Box::new([0; 0x200]),
+            mob_out1: 0,
             motion_roms_loaded: false,
             out0: 0,
             out1: 0,
@@ -254,6 +272,17 @@ impl Machine {
         Ok(())
     }
 
+    /// Copy the object table and `OUT1` as the visible field begins.
+    ///
+    /// Called once a frame by the frame scheduler, at
+    /// [`crate::frame::FIRST_VISIBLE_LINE`] — the moment the video hardware
+    /// starts reading the table. See [`Machine::mob_table`] for why a
+    /// end-of-frame read is empty.
+    pub fn latch_motion_objects(&mut self) {
+        self.mob_table.copy_from_slice(&self.sram[0xE00..0x1000]);
+        self.mob_out1 = self.out1;
+    }
+
     /// Load the motion-object picture ROMs: 16384 bytes, `136022-106.8d`
     /// followed by `136022-107.8b`.
     ///
@@ -335,8 +364,12 @@ impl Machine {
             // row 0 onto the counter.
             let vc = (line as u32 + crate::frame::FIRST_VISIBLE_LINE)
                 .wrapping_sub(crate::motion::DISPLAY_DELAY_LINES as u32) as u8;
-            let objects =
-                crate::motion::render_line(&self.sram[..], &self.mob_rom[..], self.out1, vc);
+            let objects = crate::motion::render_line(
+                &self.mob_table[..],
+                &self.mob_rom[..],
+                self.mob_out1,
+                vc,
+            );
             for x in 0..WIDTH {
                 let nibble = bitmap[line * WIDTH + x];
                 let p = objects[x];
@@ -976,6 +1009,9 @@ mod tests {
         m.sram[e + 2] = 0x00; // MPI clear
         m.sram[e + 3] = 60; // x
         let _ = OBJECT_BYTES;
+        // No frame has run, so nothing latched the table. The hardware reads
+        // it as the field begins; do the same by hand.
+        m.latch_motion_objects();
 
         let fb = m.framebuffer();
         // MPI clear, so the object wins: address {0, 0, mv} = mv.
@@ -994,6 +1030,13 @@ mod tests {
         // compositing before hashing.
         let before = m.frame_hash();
         m.sram[e + 3] = 61;
+        assert_eq!(
+            m.frame_hash(),
+            before,
+            "moving the table without re-latching must change nothing: the \
+             picture is composited from the latched copy, not from live SRAM"
+        );
+        m.latch_motion_objects();
         assert_ne!(m.frame_hash(), before, "a sprite that moves must be visible");
     }
 
