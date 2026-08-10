@@ -323,7 +323,12 @@ been left standing since Phase 2 and Phase 5 does not close it. `gate5.md` state
 where it stands rather than assuming it.
 
 **That the wasm build agrees with MAME or the MiSTer core.** It agrees with our
-native build, which is a different and smaller claim. The two-pixel `MN.ST`
-divergence at frame 162 that both external oracles report is in our model and is
-still unexplained; the WebAssembly build reproduces it faithfully, which is
-correct behaviour for a port and no comfort at all about the underlying question.
+native build, which is a different and smaller claim. Both external oracles
+report a two-pixel `MN.ST` difference at frame 162, and the WebAssembly build
+reproduces it faithfully — correct behaviour for a port.
+
+That difference was described as unexplained when this was written, and is not
+any more: it is the power-on RAM test writing `FF` through every byte of RAM,
+the bitmap included, and clearing it again — visible to our frame-boundary
+snapshot and not to a scanning implementation. `harness.md` §12 has it in full.
+It is an artefact of how pictures are extracted, not a fault in the model.

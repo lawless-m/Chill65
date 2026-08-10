@@ -514,3 +514,93 @@ Bounds on any comparison against this core, for whoever acts on it:
 - it emits **252 of 256 columns**, and the rest cannot be observed at its ports;
 - its picture arrives roughly 200 frames later than ours;
 - attribution comes from our side alone, since the core has no write log.
+
+## 12. The two pixels at frame 162, explained
+
+§10.4 and §11.7 record MAME and the verilated MiSTer core independently
+reporting the same two-pixel difference at frame 162 in `MN.ST`, and conclude
+"whatever those two pixels are, they are ours". They are ours. They are also
+**not a fault in the machine model** — they are an artefact of how this harness
+extracts a picture, and the same artefact will recur wherever the game writes a
+transient value into bitmap RAM.
+
+### What is drawing them
+
+`MN.ST` is the power-on entry, and `EBDE`–`EBFA` is Atari's RAM test:
+
+```text
+EBDE  LDX #1              ; "test cleared memory"
+EBE5  LDA (TEMP1),Y       ; "STILL ZERO?"
+EBE7  BNE RAMERR
+EBE9  LDA #FF
+EBEB  STA (TEMP1),Y       ; write FF
+EBED  EOR (TEMP1),Y       ; read back; must cancel to zero
+EBEF  BNE RAMERR
+EBF1  STA (TEMP1),Y       ; write the zero back
+EBF3  INY / BNE           ; next byte
+EBFA  CPX #90             ; pages 01-8F
+```
+
+It walks every byte from `0100` to `8FFF`, and **the bitmap is in that RAM**
+(`machine.rs`: *"0000-7FFF RAM — and the bitmap"*). A byte of `FF` is two
+nibbles of `0x0F`, selecting colour RAM entry 31 — which is zero, which decodes
+to **white**, because entries are active-low (§on `cram_rgb`).
+
+So each byte under test is two white pixels for the ~13 cycles between the store
+at `EBEB` and the store at `EBF1`, out of roughly 34 cycles per byte.
+
+The write log names `EBEB` as the writer of both pixels, and the lit byte
+**walks through memory** exactly as the test does:
+
+```text
+frame 162  (122,  2)      frame 174  (142, 60)
+frame 164  ( 40, 12)      frame 176  ( 60, 70)
+frame 168  (132, 31)      frame 180  (152, 89)
+frame 170  ( 50, 41)      frame 182  ( 70, 99)
+frame 172  (224, 50)      frame 184  (244,108)
+```
+
+Always exactly two pixels, always one byte, advancing steadily until the test
+finishes around frame 208. Twenty of the 140 frames from 120 to 260 show it.
+
+### Why the oracles do not
+
+**We snapshot; they scan out.** `Video::framebuffer` reconstructs the whole
+picture from RAM as it stands at the frame boundary, so it catches whichever
+byte happens to be mid-test at that instant. MAME and the MiSTer core produce a
+picture the way the hardware does — the beam reads each byte once per frame, in
+well under a CPU cycle — so it essentially never coincides with that byte's
+13-cycle window.
+
+Neither side is wrong about the machine. They are answering slightly different
+questions: *what is in memory now* against *what did the beam see*.
+
+### What was nearly changed, and should not be
+
+The obvious first hypothesis is that colour RAM entries 17–31 should power on
+black like entry 16, since they are the ones decoding to white. **The MiSTer
+core says otherwise.** `rtl/cram.rom` is ASCII, and reads:
+
+```text
+000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000
+1FF 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000
+```
+
+Entry 16 is `1FF`; entries 17–31 are `000`, exactly as `Video::new` leaves them.
+Ours already matches the reference implementation, and "fixing" those entries
+would have moved us away from it while appearing to fix the symptom.
+
+### The general caveat
+
+**Any transient the game writes into bitmap RAM appears in our snapshots and not
+on hardware.** The RAM test is the loudest case because it touches every byte,
+but it is a property of the extraction method, not of that routine. Anything
+comparing our pictures against a scanning implementation inherits it.
+
+Modelling scanout timing would remove it and is not proposed: the snapshot is
+deliberate, it is what makes a frame hash cheap and deterministic, and the error
+it admits is bounded by how long a byte spends holding a value it is about to
+lose.
+
+`gate3.md` and `gate4.md` record this divergence as unexplained, which it was
+when they were written.

@@ -56,7 +56,8 @@ that command sets only `CHILL65_CORPUS`. Reported here as skipped would have bee
 a gap against `gate4.md`'s "both oracles live", so it was re-run as
 `CHILL65_MAME=$(which mame) cargo test -p chill65-diff -- --ignored`; the lines
 above are from that run. Both oracles still independently report the same
-two-pixel difference at frame 162.
+two-pixel difference at frame 162 — **since explained**, and not a fault in the
+machine model. See `harness.md` §12 and the note below.
 
 ### 7 — the majority still holds
 
@@ -118,10 +119,19 @@ depends on it — a gate that fails on a slow machine tests the machine.
 **That it is playable.** See below; that is human-judged and it is not claimed.
 
 **That the wasm build agrees with MAME or the MiSTer core.** It agrees with our
-native build, which is a smaller and different claim. The two-pixel `MN.ST`
-divergence at frame 162 is in our model, both external oracles still report it,
-and the WebAssembly build reproduces it faithfully — correct behaviour for a
-port, and no comfort at all about the underlying question.
+native build, which is a smaller and different claim. Both external oracles
+still report the two-pixel `MN.ST` difference at frame 162, and the WebAssembly
+build reproduces it faithfully — correct behaviour for a port.
+
+**Note added after this gate ran.** That divergence is no longer unexplained.
+It is the power-on RAM test at `EBDE`–`EBFA` writing `FF` to every byte of RAM
+— the bitmap included — and clearing it again; our framebuffer is a snapshot of
+RAM at the frame boundary, so it catches whichever byte is mid-test, while MAME
+and the core scan out and essentially never coincide with that byte's 13-cycle
+window. The lit byte walks through memory exactly as the test does. Not a fault
+in the machine: an artefact of snapshot-versus-scanout extraction, which will
+recur wherever the game writes a transient into bitmap RAM. `harness.md` §12
+sets it out in full, with the evidence and the wrong fix it rules out.
 
 **That structure recovery was done.** It was measured, not written. See below.
 

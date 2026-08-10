@@ -79,7 +79,10 @@ MiSTer FPGA core is verilated unmodified as a second reference.
 
 Its first finding is that our colour RAM powers on white where both oracles power
 on black — since corrected, after which both independently report the same
-two-pixel difference at frame 162 in `MN.ST`. See `gate3.md`.
+two-pixel difference at frame 162 in `MN.ST`. That one is now explained too: it
+is the power-on RAM test writing `FF` through every byte of memory, the bitmap
+included, and clearing it again — which a frame-boundary snapshot catches and a
+scanning implementation does not. See `gate3.md` and `harness.md` §12.
 
 **Phase 4 — the emitter.** `chill65-asm` lowers the game's routines to Rust,
 and `chill65-native` compiles them at build time and dispatches them beside the
