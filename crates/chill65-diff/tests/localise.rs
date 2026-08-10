@@ -79,8 +79,8 @@ fn an_injected_fault_is_localised_to_its_frame_and_its_routine() {
     assert!(!symbols.is_empty(), "the symbol table is empty");
     let trace = Trace::idle(FRAMES as usize);
 
-    let clean = || OurRuntime::new(images.prog.clone(), images.data.clone());
-    let faulty = || OurRuntime::new(inject(&images.prog), images.data.clone());
+    let clean = || OurRuntime::new(images.prog.clone(), images.data.clone(), Some(images.mob.clone()));
+    let faulty = || OurRuntime::new(inject(&images.prog), images.data.clone(), Some(images.mob.clone()));
 
     // (a) The same images against themselves must report nothing. If this ever
     // fails, every other result here is noise.

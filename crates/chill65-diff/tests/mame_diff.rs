@@ -11,7 +11,8 @@
 //! generated, and the first divergent frame is the same on two independent
 //! invocations. Whether our runtime and MAME draw the same picture is the
 //! harness's *output*, not its pass condition — `gate2.md` lists six hardware
-//! claims still marked UNVERIFIED and motion objects are not modelled at all,
+//! claims still marked UNVERIFIED, and motion objects are modelled but not yet
+//! calibrated against either oracle,
 //! so divergence is expected and informative. A test demanding equality would
 //! be one the project cannot pass.
 
@@ -85,7 +86,7 @@ fn mame_is_deterministic_and_the_first_divergence_is_reproducible() {
     let images = build_images(&game).expect("build images");
     let symbols = Symbols::load(&images.sym).expect("symbols");
     let attract = trace("idle-attract.trace");
-    let mut ours = OurRuntime::new(images.prog.clone(), images.data.clone());
+    let mut ours = OurRuntime::new(images.prog.clone(), images.data.clone(), Some(images.mob.clone()));
 
     let report = localise_external(&mut ours, &mut mame, &attract, FRAMES, &symbols)
         .expect("localise against MAME");
@@ -114,13 +115,14 @@ fn mame_is_deterministic_and_the_first_divergence_is_reproducible() {
     }
     text.push_str(
         "\nDivergence here is expected output, not failure: six hardware claims\n\
-         remain UNVERIFIED (gate2.md) and motion objects are not modelled.\n",
+         remain UNVERIFIED (gate2.md), and motion objects are modelled\n\
+           from the RTL but not yet calibrated against an oracle.\n",
     );
     std::fs::write(&path, &text).expect("write report");
     eprintln!("wrote {}", path.display());
 
     // And the answer must be the same the second time round.
-    let mut ours_again = OurRuntime::new(images.prog, images.data);
+    let mut ours_again = OurRuntime::new(images.prog, images.data, Some(images.mob));
     let again = localise_external(&mut ours_again, &mut mame, &attract, FRAMES, &symbols)
         .expect("second localise");
     assert_eq!(

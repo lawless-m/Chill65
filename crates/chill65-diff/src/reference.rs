@@ -11,11 +11,11 @@
 //! made to produce; anything narrower would privilege ours.
 //!
 //! This is why the harness does not reuse [`chill65_runtime::Machine::frame_hash`].
-//! That hashes *palette indices*, which only exist inside our machine model —
-//! MAME hands out finished pixels and the RTL emits RGB directly off the video
-//! bus, and neither can say which colour RAM entry a pixel came from. So the
-//! harness hashes the canonical RGB instead, with the same FNV-1a the runtime
-//! already uses.
+//! That hashes *colour RAM addresses*, which only exist inside our machine
+//! model — MAME hands out finished pixels and the RTL emits RGB directly off
+//! the video bus, and neither can say which colour RAM entry a pixel came from.
+//! So the harness hashes the canonical RGB instead, with the same FNV-1a the
+//! runtime already uses.
 
 use chill65_runtime::video::{cram_rgb, fnv1a, BITMAP_CRAM_BASE, HEIGHT, WIDTH};
 
@@ -75,14 +75,17 @@ impl Frame {
     }
 }
 
-/// Expand our machine's palette indices into canonical RGB.
+/// Expand our machine's per-pixel colour RAM addresses into canonical RGB.
 ///
-/// The mapping is the one `write_ppm` in `chill65-runtime/src/bin/ccrun.rs`
-/// applies: index into colour RAM at [`BITMAP_CRAM_BASE`], then [`cram_rgb`].
+/// `Machine::framebuffer` already arbitrated bitmap against motion objects and
+/// returned the five-bit colour RAM address, so this only looks the colour up —
+/// the same thing `write_ppm` in `chill65-runtime/src/bin/ccrun.rs` does. It
+/// must **not** add [`BITMAP_CRAM_BASE`] itself: that offset is inside the
+/// address now, and adding it twice would shift every pixel by sixteen.
 pub fn rgb_from_indices(picture: &[u8], cram: &[u16; 32]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(picture.len() * 3);
     for &pixel in picture {
-        let entry = cram[(BITMAP_CRAM_BASE + pixel as usize) & 0x1F];
+        let entry = cram[pixel as usize & 0x1F];
         let (r, g, b) = cram_rgb(entry);
         rgb.extend_from_slice(&[r, g, b]);
     }
@@ -120,8 +123,8 @@ mod tests {
     /// Colour RAM where entry `BITMAP_CRAM_BASE + i` is distinguishable.
     fn ramp_cram() -> [u16; 32] {
         let mut cram = [0u16; 32];
-        for i in 0..16 {
-            cram[(BITMAP_CRAM_BASE + i) & 0x1F] = i as u16;
+        for i in 0..32 {
+            cram[i] = (i as u16) * 9;
         }
         cram
     }
@@ -134,11 +137,14 @@ mod tests {
     }
 
     #[test]
-    fn indices_go_through_colour_ram() {
+    fn addresses_go_through_colour_ram_unshifted() {
         let cram = ramp_cram();
-        let rgb = rgb_from_indices(&[0, 1], &cram);
+        // A bitmap pixel of nibble 0 arrives as address BITMAP_CRAM_BASE, and
+        // a motion-object pixel can arrive as anything from 0 to 15 — so the
+        // address is used as given, with no offset added.
+        let rgb = rgb_from_indices(&[BITMAP_CRAM_BASE as u8, 3], &cram);
         let (r0, g0, b0) = cram_rgb(cram[BITMAP_CRAM_BASE]);
-        let (r1, g1, b1) = cram_rgb(cram[BITMAP_CRAM_BASE + 1]);
+        let (r1, g1, b1) = cram_rgb(cram[3]);
         assert_eq!(rgb, vec![r0, g0, b0, r1, g1, b1]);
     }
 

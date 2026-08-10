@@ -8,7 +8,7 @@
 //! As with MAME, this asserts **mechanics and reproducibility, never
 //! equality**. Divergence between our model and an FPGA core is the harness's
 //! output; `gate2.md` lists six hardware claims still marked UNVERIFIED and
-//! motion objects are not modelled at all.
+//! motion objects are modelled but not yet calibrated against either oracle.
 //!
 //! The simulation costs roughly half a second of wall clock per emulated frame,
 //! so the determinism check runs short and the comparison runs once.
@@ -63,7 +63,7 @@ fn the_core_is_deterministic_and_the_divergence_is_reproducible() {
         let path = workspace_root().join("traces/idle-attract.trace");
         Trace::parse(&std::fs::read_to_string(&path).expect("read trace")).expect("parse trace")
     };
-    let mut ours = OurRuntime::new(images.prog.clone(), images.data.clone());
+    let mut ours = OurRuntime::new(images.prog.clone(), images.data.clone(), Some(images.mob.clone()));
 
     core.forget();
     let report = localise_external(&mut ours, &mut core, &attract, FRAMES, &symbols)
@@ -98,14 +98,15 @@ fn the_core_is_deterministic_and_the_divergence_is_reproducible() {
          - our colour RAM powers on zeroed, the core's has entry 16 set to 1FF,\n\
            so frame 0 differs for reasons unrelated to drawing.\n\
          - divergence here is expected output, not failure: six hardware claims\n\
-           remain UNVERIFIED (gate2.md) and motion objects are not modelled.\n",
+           remain UNVERIFIED (gate2.md), and motion objects are modelled\n\
+           from the RTL but not yet calibrated against an oracle.\n",
     );
     std::fs::write(&path, &text).expect("write report");
     eprintln!("wrote {}", path.display());
 
     // Reproducible: the cached run is reused for our side's re-derivation, so
     // this checks the harness rather than the simulator.
-    let mut ours_again = OurRuntime::new(images.prog, images.data);
+    let mut ours_again = OurRuntime::new(images.prog, images.data, Some(images.mob));
     let again = localise_external(&mut ours_again, &mut core, &attract, FRAMES, &symbols)
         .expect("second localise");
     assert_eq!(

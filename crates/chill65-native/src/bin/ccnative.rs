@@ -173,7 +173,7 @@ fn setup(args: &Args) -> Result<(OurRuntime, Symbols, Trace, u32), String> {
     let (images, trace, frames) = images_and_trace(args)?;
     let symbols = Symbols::load(&images.sym)?;
     Ok((
-        OurRuntime::new(images.prog, images.data),
+        OurRuntime::new(images.prog, images.data, Some(images.mob)),
         symbols,
         trace,
         frames,

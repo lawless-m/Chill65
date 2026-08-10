@@ -140,7 +140,7 @@ fn the_oracles_are_on_our_timebase() {
     let trace = Trace::idle(MAME_FRAMES as usize);
 
     // --- our side -------------------------------------------------------
-    let mut ours = OurRuntime::new(images.prog.clone(), images.data.clone());
+    let mut ours = OurRuntime::new(images.prog.clone(), images.data.clone(), Some(images.mob.clone()));
     let mine = ours.run(&trace, MAME_FRAMES, true).expect("our run");
     let my_stamps = stamps(&mine, "ours");
 
@@ -184,7 +184,7 @@ fn the_oracles_are_on_our_timebase() {
         return;
     }
     let short = Trace::idle(MISTER_FRAMES as usize);
-    let mut ours = OurRuntime::new(images.prog, images.data);
+    let mut ours = OurRuntime::new(images.prog, images.data, Some(images.mob));
     let mine = ours.run(&short, MISTER_FRAMES, true).expect("our short run");
     let my_stamps = stamps(&mine, "ours");
 

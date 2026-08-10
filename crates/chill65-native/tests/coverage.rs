@@ -60,7 +60,7 @@ fn every_trace_verifies_and_the_metric_reports() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let trace = load(path);
         let frames = trace.len() as u32;
-        let mut ours = OurRuntime::new(images.prog.clone(), images.data.clone());
+        let mut ours = OurRuntime::new(images.prog.clone(), images.data.clone(), Some(images.mob.clone()));
 
         let interpreted = ours
             .play_with(&trace, frames, &mut NoCompiled)

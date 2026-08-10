@@ -44,13 +44,22 @@ pub struct Playback {
 pub struct OurRuntime {
     prog: Vec<u8>,
     data: Vec<u8>,
+    /// The motion-object picture ROMs, or `None` to run without sprites.
+    mob: Option<Vec<u8>>,
 }
 
 impl OurRuntime {
     /// `prog` must be 24576 bytes and `data` 16384; [`Machine::load_roms`]
-    /// enforces it.
-    pub fn new(prog: Vec<u8>, data: Vec<u8>) -> Self {
-        OurRuntime { prog, data }
+    /// enforces it. `mob` is the 16384-byte motion-object picture ROM pair, or
+    /// `None`.
+    ///
+    /// **`mob` is a required argument rather than a builder step.** A
+    /// comparison that quietly left the sprites out would not look like a
+    /// missing option; it would look like a large, mysterious divergence
+    /// against every oracle, and cost a calibration session to find. Every
+    /// caller says which it wants.
+    pub fn new(prog: Vec<u8>, data: Vec<u8>, mob: Option<Vec<u8>>) -> Self {
+        OurRuntime { prog, data, mob }
     }
 
     /// Run `frames` frames from cold, calling `per_frame` after each, and hand
@@ -80,6 +89,9 @@ impl OurRuntime {
     ) -> Result<(Machine, u64), String> {
         let mut machine = Machine::new();
         machine.load_roms(&self.prog, &self.data)?;
+        if let Some(mob) = &self.mob {
+            machine.load_motion_roms(mob)?;
+        }
         if log_writes {
             machine.enable_write_log();
         }

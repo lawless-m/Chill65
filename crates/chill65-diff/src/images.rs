@@ -33,8 +33,33 @@ pub fn workspace_root() -> PathBuf {
 pub struct Images {
     pub prog: Vec<u8>,
     pub data: Vec<u8>,
+    /// The motion-object picture ROMs: `136022-106.8d` then `136022-107.8b`.
+    pub mob: Vec<u8>,
     /// Path to the program's `.sym` file — routine attribution reads this.
     pub sym: PathBuf,
+}
+
+/// Bytes of `372BR.RS4` that are the two motion-object picture ROMs.
+pub const MOB_LEN: usize = 0x4000;
+
+/// The motion-object picture ROMs, read from the corpus.
+///
+/// `372BR.RS4` holds `136022-106.8d` then `136022-107.8b`, 8192 bytes each —
+/// the same slicing `romset.rs` uses to rebuild MAME's set (see its `Source::
+/// Raw("372BR.RS4", ...)` entries) and the order
+/// `Machine::load_motion_roms` expects. Unlike the program and data images
+/// this one is not assembled, only read: it is picture data, not code.
+pub fn motion_rom_image(corpus: &Path) -> Result<Vec<u8>, String> {
+    let path = corpus.join("372BR.RS4");
+    let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if bytes.len() < MOB_LEN {
+        return Err(format!(
+            "{} is {} bytes, want at least {MOB_LEN}",
+            path.display(),
+            bytes.len()
+        ));
+    }
+    Ok(bytes[..MOB_LEN].to_vec())
 }
 
 fn assemble(
@@ -104,6 +129,7 @@ pub fn build_images(corpus: &Path) -> Result<Images, String> {
     Ok(Images {
         prog,
         data,
+        mob: motion_rom_image(corpus)?,
         sym: sym_path,
     })
 }

@@ -49,7 +49,7 @@ fn every_committed_trace_plays_deterministically_and_changes_something() {
         return;
     };
     let images = build_images(&game).expect("build images");
-    let player = || OurRuntime::new(images.prog.clone(), images.data.clone());
+    let player = || OurRuntime::new(images.prog.clone(), images.data.clone(), Some(images.mob.clone()));
 
     let files = trace_files();
     assert!(

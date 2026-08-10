@@ -94,7 +94,7 @@ fn playback_is_deterministic_and_input_reaches_the_machine() {
     let images = build_images(&corpus).expect("build images");
 
     let idle = Trace::idle(FRAMES as usize);
-    let mut player = OurRuntime::new(images.prog.clone(), images.data.clone());
+    let mut player = OurRuntime::new(images.prog.clone(), images.data.clone(), Some(images.mob.clone()));
 
     let first = player.hashes(&idle, FRAMES).expect("first idle run");
     let second = player.hashes(&idle, FRAMES).expect("second idle run");
@@ -164,7 +164,7 @@ fn frames_are_stamped_with_the_cycle_they_were_captured_at() {
         return;
     };
     let images = build_images(&corpus).expect("images");
-    let mut ours = OurRuntime::new(images.prog, images.data);
+    let mut ours = OurRuntime::new(images.prog, images.data, Some(images.mob));
     let trace = Trace::idle(FRAMES as usize);
 
     let play = ours.play(&trace, FRAMES).expect("playback");

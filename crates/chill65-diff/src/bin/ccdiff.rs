@@ -143,7 +143,9 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
 
     std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
 
-    let mut player = OurRuntime::new(prog, data);
+    // No motion ROMs: `run` takes whatever images it is given and has
+    // no third one to take. Sprites are absent from what it dumps.
+    let mut player = OurRuntime::new(prog, data, None);
     let run = player.run(&trace, frames, pixels)?;
 
     let hashes: Vec<u64> = run.iter().map(|f| f.hash).collect();
@@ -205,8 +207,8 @@ fn cmd_localise(args: &[String]) -> Result<(), String> {
     let symbols = Symbols::load(&sym_path)?;
 
     let mut b_images = loaded.split_off(2);
-    let mut a = OurRuntime::new(loaded.remove(0), loaded.remove(0));
-    let mut b = OurRuntime::new(b_images.remove(0), b_images.remove(0));
+    let mut a = OurRuntime::new(loaded.remove(0), loaded.remove(0), None);
+    let mut b = OurRuntime::new(b_images.remove(0), b_images.remove(0), None);
 
     println!("{}", localise(&mut a, &mut b, &trace, frames, &symbols)?);
     Ok(())
