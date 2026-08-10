@@ -1,0 +1,15 @@
+# Attract mode, no input whatsoever
+#
+# Trace format v1 — see crates/chill65-diff/src/trace.rs.
+#
+# Committable: trackball deltas and switch levels are our own authored work,
+# not game-derived bytes. Plan section 9 forbids ROM images, framebuffers and
+# the .MAC/.LDA/.DAT source in this repository; it does not forbid recordings
+# of what a player did with the controls.
+#
+# The baseline every other trace is compared against. 600 frames takes it
+# well past the power-on self-test, which ends around frame 353
+# (hardware.md section 10.2), and into attract mode proper.
+
+chill65-trace 1
+0 0 - x600

@@ -16,6 +16,19 @@ pub struct Snapshot {
     pub writers: Vec<Option<u16>>,
 }
 
+/// Playing a trace through: the hash stream, and whether the machine stayed
+/// healthy while producing it.
+///
+/// The watchdog matters more than it looks. If the game crashes, a real board
+/// resets itself and carries on, so a crashed run still *looks* alive and still
+/// produces a full stream of frames. An expired watchdog is the only signal
+/// that happened.
+pub struct Playback {
+    pub hashes: Vec<u64>,
+    pub cycles: u64,
+    pub watchdog_expired: bool,
+}
+
 /// The Crystal Castles machine model, driven from a trace.
 pub struct OurRuntime {
     prog: Vec<u8>,
@@ -70,6 +83,19 @@ impl OurRuntime {
             per_frame(&machine);
         }
         Ok(machine)
+    }
+
+    /// Play a whole trace, reporting the hash stream and the machine's health.
+    pub fn play(&mut self, trace: &Trace, frames: u32) -> Result<Playback, String> {
+        let mut hashes = Vec::with_capacity(frames as usize);
+        let machine = self.drive(trace, frames, false, |m| {
+            hashes.push(Frame::new(rgb_from_indices(&m.framebuffer(), &m.video.cram), false).hash);
+        })?;
+        Ok(Playback {
+            hashes,
+            cycles: machine.cycles,
+            watchdog_expired: machine.watchdog_expired,
+        })
     }
 
     /// Run as far as `frame` inclusive and capture it, with attribution.

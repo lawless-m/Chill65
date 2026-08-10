@@ -1,0 +1,180 @@
+# Coin up, start, then play
+#
+# Trace format v1 — see crates/chill65-diff/src/trace.rs.
+#
+# Committable: trackball deltas and switch levels are our own authored work,
+# not game-derived bytes. Plan section 9 forbids ROM images, framebuffers and
+# the .MAC/.LDA/.DAT source in this repository; it does not forbid recordings
+# of what a player did with the controls.
+#
+# Coin timing follows the game's own routine (CCN.MAC:269-300, Mike
+# Albaugh's): the switch is sampled four times a frame, a valid coin is
+# 16-800ms of contact -- so a longer press is not a safer one -- and the
+# credit only lands 30 frames later, once $PSTSL, the post-coin slam timer,
+# has run down. Pressing start before that does nothing at all.
+# 
+# Then sweeps in all four directions plus diagonals, at three different
+# magnitudes, with a jump between cycles. Start1 is also the jump button:
+# the RTL calls the input STARTJMP and the game maps MA.ST1 and MA.BUT
+# both to MD6 (CG.MAC:125,127), so one press means different things
+# depending on game state.
+
+chill65-trace 1
+0 0 - x400
+0 0 CoinLeft x10
+0 0 - x50
+0 0 Start1 x10
+6 0 - x28
+0 0 - x2
+0 6 - x28
+0 0 - x2
+-6 0 - x28
+0 0 - x2
+0 -6 - x28
+0 0 - x2
+3 3 - x28
+0 0 - x2
+-3 3 - x28
+0 0 - x2
+12 0 - x28
+0 0 - x2
+0 12 - x28
+0 0 - x2
+-12 -12 - x28
+0 0 - x2
+1 -1 - x28
+0 0 - x2
+0 0 Start1 x6
+0 0 - x4
+6 0 - x28
+0 0 - x2
+0 6 - x28
+0 0 - x2
+-6 0 - x28
+0 0 - x2
+0 -6 - x28
+0 0 - x2
+3 3 - x28
+0 0 - x2
+-3 3 - x28
+0 0 - x2
+12 0 - x28
+0 0 - x2
+0 12 - x28
+0 0 - x2
+-12 -12 - x28
+0 0 - x2
+1 -1 - x28
+0 0 - x2
+0 0 Start1 x6
+0 0 - x4
+6 0 - x28
+0 0 - x2
+0 6 - x28
+0 0 - x2
+-6 0 - x28
+0 0 - x2
+0 -6 - x28
+0 0 - x2
+3 3 - x28
+0 0 - x2
+-3 3 - x28
+0 0 - x2
+12 0 - x28
+0 0 - x2
+0 12 - x28
+0 0 - x2
+-12 -12 - x28
+0 0 - x2
+1 -1 - x28
+0 0 - x2
+0 0 Start1 x6
+0 0 - x4
+6 0 - x28
+0 0 - x2
+0 6 - x28
+0 0 - x2
+-6 0 - x28
+0 0 - x2
+0 -6 - x28
+0 0 - x2
+3 3 - x28
+0 0 - x2
+-3 3 - x28
+0 0 - x2
+12 0 - x28
+0 0 - x2
+0 12 - x28
+0 0 - x2
+-12 -12 - x28
+0 0 - x2
+1 -1 - x28
+0 0 - x2
+0 0 Start1 x6
+0 0 - x4
+6 0 - x28
+0 0 - x2
+0 6 - x28
+0 0 - x2
+-6 0 - x28
+0 0 - x2
+0 -6 - x28
+0 0 - x2
+3 3 - x28
+0 0 - x2
+-3 3 - x28
+0 0 - x2
+12 0 - x28
+0 0 - x2
+0 12 - x28
+0 0 - x2
+-12 -12 - x28
+0 0 - x2
+1 -1 - x28
+0 0 - x2
+0 0 Start1 x6
+0 0 - x4
+6 0 - x28
+0 0 - x2
+0 6 - x28
+0 0 - x2
+-6 0 - x28
+0 0 - x2
+0 -6 - x28
+0 0 - x2
+3 3 - x28
+0 0 - x2
+-3 3 - x28
+0 0 - x2
+12 0 - x28
+0 0 - x2
+0 12 - x28
+0 0 - x2
+-12 -12 - x28
+0 0 - x2
+1 -1 - x28
+0 0 - x2
+0 0 Start1 x6
+0 0 - x4
+6 0 - x28
+0 0 - x2
+0 6 - x28
+0 0 - x2
+-6 0 - x28
+0 0 - x2
+0 -6 - x28
+0 0 - x2
+3 3 - x28
+0 0 - x2
+-3 3 - x28
+0 0 - x2
+12 0 - x28
+0 0 - x2
+0 12 - x28
+0 0 - x2
+-12 -12 - x28
+0 0 - x2
+1 -1 - x28
+0 0 - x2
+0 0 Start1 x6
+0 0 - x4

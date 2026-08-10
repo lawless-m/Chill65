@@ -1,0 +1,15 @@
+# Self-test held from power-on
+#
+# Trace format v1 — see crates/chill65-diff/src/trace.rs.
+#
+# Committable: trackball deltas and switch levels are our own authored work,
+# not game-derived bytes. Plan section 9 forbids ROM images, framebuffers and
+# the .MAC/.LDA/.DAT source in this repository; it does not forbid recordings
+# of what a player did with the controls.
+#
+# SELFTEST is a level, not an edge (CG.MAC:134, MA.STS = MD4), so it is
+# held for the whole run rather than pulsed. This is the operator's
+# diagnostic screen, not the game.
+
+chill65-trace 1
+0 0 SelfTest x600
