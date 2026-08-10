@@ -48,6 +48,12 @@ const DOWNLOAD_ORDER: [&str; 7] = [
 pub struct Capture {
     /// Canonical 256x232 RGB24 frames, left-aligned, unemitted columns zero.
     pub frames: Vec<Vec<u8>>,
+    /// Emulated CPU cycles elapsed at each frame's capture, index aligned with
+    /// `frames`.
+    ///
+    /// The simulation counts master clocks; these are already divided down to
+    /// CPU cycles, which is the unit all three implementations share.
+    pub cycles: Vec<u64>,
     /// Pixels per line the core actually emitted — 252 for this core.
     pub emitted: usize,
 }
@@ -197,12 +203,36 @@ pub fn capture_trace(corpus: &Path, trace: &Trace, frames: u32) -> Result<Captur
             frames
         ));
     }
+    // Master clocks at each frame write, one per line. The core runs from a
+    // 10 MHz master and `Clock.v` divides it by eight for `ce2H`, the CPU clock
+    // enable — so eight master clocks is one CPU cycle. That derivation is the
+    // same one `chill65-runtime`'s `frame.rs` uses to reach 20,480 cycles a
+    // frame, and it is what puts the core on the same timebase as the others.
+    let cycles_text = std::fs::read_to_string(dir.join("frames.raw.cycles"))
+        .map_err(|e| format!("cycles sidecar: {e}"))?;
+    let ticks: Vec<u64> = cycles_text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            l.trim()
+                .parse::<u64>()
+                .map_err(|e| format!("cycles sidecar: {l:?} is not a tick count: {e}"))
+        })
+        .collect::<Result<_, _>>()?;
+    if ticks.len() != frames as usize {
+        return Err(format!(
+            "cycles sidecar: {} stamps for {frames} frames",
+            ticks.len()
+        ));
+    }
+
     Ok(Capture {
         frames: blob
             .chunks_exact(stride)
             .take(frames as usize)
             .map(<[u8]>::to_vec)
             .collect(),
+        cycles: ticks.iter().map(|t| t / 8).collect(),
         emitted,
     })
 }
@@ -214,7 +244,7 @@ pub fn capture_trace(corpus: &Path, trace: &Trace, frames: u32) -> Result<Captur
 /// twice in one comparison would double a five-minute run for nothing.
 pub struct MisterReference {
     corpus: PathBuf,
-    cache: Option<(String, u32, Vec<Vec<u8>>)>,
+    cache: Option<(String, u32, Capture)>,
 }
 
 impl MisterReference {
@@ -241,13 +271,23 @@ impl Reference for MisterReference {
         };
         if fresh {
             let capture = capture_trace(&self.corpus, trace, frames)?;
-            self.cache = Some((key, frames, capture.frames));
+            // Visible under --nocapture: flat 20480 deltas are what say the
+            // stamp means what it claims.
+            let deltas: Vec<u64> = capture.cycles.windows(2).take(4).map(|w| w[1] - w[0]).collect();
+            eprintln!(
+                "mister cycles:    first {:?}, deltas {:?}",
+                &capture.cycles[..capture.cycles.len().min(4)],
+                deltas
+            );
+            self.cache = Some((key, frames, capture));
         }
-        let (_, _, frames_out) = self.cache.as_ref().expect("just populated");
-        Ok(frames_out
+        let (_, _, capture) = self.cache.as_ref().expect("just populated");
+        Ok(capture
+            .frames
             .iter()
+            .zip(&capture.cycles)
             .take(frames as usize)
-            .map(|rgb| Frame::new(rgb.clone(), want_pixels))
+            .map(|(rgb, cycles)| Frame::new(rgb.clone(), want_pixels).at(*cycles))
             .collect())
     }
 }

@@ -73,9 +73,20 @@ int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     VCCastles* dut = new VCCastles;
 
+    // Master-clock cycles since the simulation began, counted here because
+    // this lambda is the only thing that advances `clk` — the ROM download
+    // below toggles `dn_clk`, a separate port, so it costs no master clocks.
+    //
+    // Frames are dated in these ticks so the harness can put the core on the
+    // same timebase as our runtime and MAME. Comparing frame N against frame N
+    // assumes the two sides mean the same frame, and nothing established that;
+    // see harness.md section 12.
+    long long master_ticks = 0;
+
     auto tick = [&](void) {
         dut->clk = 0; dut->eval();
         dut->clk = 1; dut->eval();
+        master_ticks++;
     };
 
     // Hold reset, then load the ROMs through the download port, then release.
@@ -103,6 +114,12 @@ int main(int argc, char** argv) {
 
     FILE* out = fopen(out_path, "wb");
     if (!out) { fprintf(stderr, "cannot open %s\n", out_path); return 2; }
+
+    // One master-clock count per frame written, in the same order.
+    char cycles_path[512];
+    snprintf(cycles_path, sizeof(cycles_path), "%s.cycles", out_path);
+    FILE* cycles_out = fopen(cycles_path, "w");
+    if (!cycles_out) { fprintf(stderr, "cannot open %s\n", cycles_path); return 2; }
 
     std::vector<unsigned char> frame(WIDTH * HEIGHT * 3, 0);
     int captured = 0;
@@ -177,6 +194,9 @@ int main(int argc, char** argv) {
         if (vsync && !prev_vsync) {
             if (y >= 0) {
                 fwrite(frame.data(), 1, frame.size(), out);
+                // Dated at the same instant the pixels are written, so stamp k
+                // and frame k are one moment rather than one frame number.
+                fprintf(cycles_out, "%lld\n", master_ticks);
                 captured++;
                 apply(captured);
             }
@@ -209,6 +229,7 @@ int main(int argc, char** argv) {
     }
 
     fclose(out);
+    fclose(cycles_out);
 
     char dims[512];
     snprintf(dims, sizeof(dims), "%s.dims", out_path);
