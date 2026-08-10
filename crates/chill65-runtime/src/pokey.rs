@@ -1,11 +1,42 @@
-//! POKEY ×2 — registers and the RANDOM generator. **No audio synthesis.**
+//! POKEY ×2 — registers, the RANDOM generator, and the audio polynomials.
 //!
 //! # Scope
 //!
-//! Audio output is deliberately out of scope for Phase 2 (plan §5 calls POKEY
-//! "not the interesting part", and the gate is headless). What is *not* out of
-//! scope is `RANDOM`, because the game reads it to make **gameplay** decisions,
-//! not just noise:
+//! Audio output was out of scope for Phase 2 (plan §5 calls POKEY "not the
+//! interesting part", and the gate is headless). It is being built now, from the
+//! bottom up: this module holds the free-running parts — [`Poly4`], [`Poly5`]
+//! and the two clock divisors — and the per-channel pipeline that consumes them
+//! is not written yet.
+//!
+//! # Where the audio path comes from
+//!
+//! **Measured against the verilated core, not transcribed from it.** The core's
+//! `rtl/Pokey/` is © 2013 Mark Watson and licensed for non-commercial use only,
+//! with the notice extending to derived works, so it cannot be a source for an
+//! MIT repository. Everything in the audio path below was instead recovered by
+//! running an original fixture on the core and reading `SOUT` back — observing
+//! behaviour rather than copying expression. Each item records the sequence or
+//! period it was identified from, so the evidence is checkable and the tests
+//! assert the measurements rather than the implementation.
+//!
+//! One thing this does *not* yet cover: poly17's audio tap. [`Poly17`] below
+//! predates this work and drives `RANDOM`, where its sourcing is noted on the
+//! type itself.
+//!
+//! # No delayed taps here
+//!
+//! POKEY implementations commonly carry the polynomial bits through a delay line
+//! so the sampling instant lines up with the rest of the chip. No such delay is
+//! modelled below, and that is a measurement result rather than an omission:
+//! plain undelayed shift registers reproduce both captured sequences exactly,
+//! term for term, over every period observed. A delay in the real part would be
+//! a constant phase offset in the output, which is precisely what aligning our
+//! stream against the core's establishes — so if one exists it will appear there
+//! as an offset, in a place designed to measure it, rather than being guessed at
+//! here.
+//!
+//! What was never out of scope is `RANDOM`, because the game reads it to make
+//! **gameplay** decisions, not just noise:
 //!
 //! - `CATOUT.MAC:22` — `LDA RANDOM / AND #0E0 / ADC #010 / STA XB` picks the
 //!   cat's X position on the bitmap. A constant here would spawn every cat in
@@ -52,6 +83,14 @@
 /// Transcribed literally from `pokey_poly_17_9.v:47-70` so that the sequence
 /// agrees with the reference core bit for bit, rather than from one of the
 /// several mutually inconsistent prose descriptions of POKEY's poly17.
+///
+/// **That file is one of Mark Watson's**, so this transcription predates — and
+/// contradicts — the sourcing rule stated in the module docs. It is left alone
+/// here rather than quietly rewritten, because it is a decision to take rather
+/// than a bug to fix. It can be resolved without changing a line of it:
+/// distortion `AUDC = 0x8` puts poly17 on the output the same way `0xC` puts
+/// poly4 there, so the sequence can be measured off the core and this
+/// implementation either confirmed by it or replaced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Poly17 {
     /// `shift_reg` — 17 bits.
@@ -98,6 +137,149 @@ impl Poly17 {
     /// `rand_out = ~shift_reg[15:8]` (`pokey_poly_17_9.v:73`).
     pub fn random(&self) -> u8 {
         !((self.shift >> 8) as u8)
+    }
+}
+
+/// The audio clock divisors, **measured**, not taken from a datasheet.
+///
+/// A pure tone with `AUDF = 0` toggles its output once per divider tick, so its
+/// period is two ticks and the divisor is half the measured period. Captured
+/// from the verilated core's `SOUT`, one sample per CPU cycle:
+///
+/// ```text
+/// AUDCTL 00   pure-tone period 56 cycles   -> divisor 28
+/// AUDCTL 01   pure-tone period 228 cycles  -> divisor 114
+/// ```
+///
+/// `AUDCTL` bit 0 selects the slow clock. The ratio 114/28 = 4.07 is the
+/// documented 63.9 kHz : 15.7 kHz relationship, which is the cross-check that
+/// these two numbers are the two clocks and not something else.
+///
+/// On an Atari home computer these divide 1.79 MHz. This board clocks POKEY at
+/// the 1.25 MHz CPU rate instead — `AudioOutput.v:26` gives the chips `ce2Hd`
+/// and `SupportChips.v:240` ties `.enable_179(1'b1)` — so the *divisors* are the
+/// chip's but the resulting frequencies are 44.6 kHz and 11.0 kHz.
+pub const DIV_FAST: u32 = 28;
+/// The slow audio clock divisor; see [`DIV_FAST`].
+pub const DIV_SLOW: u32 = 114;
+
+/// The 4-bit polynomial counter.
+///
+/// **Measured, not transcribed.** `rtl/Pokey/` is © 2013 Mark Watson and
+/// licensed non-commercially, so nothing here comes from it; see the README.
+/// Instead a fixture selected distortion `AUDC = 0xC` — poly4 with poly5 out of
+/// circuit — with `AUDF = 0` and full volume, and the core's `SOUT` was sampled
+/// once per divider tick. That setting puts the polynomial's bit straight on the
+/// output, so the sequence is read directly:
+///
+/// ```text
+/// 1,0,0,0,1,1,1,1,0,1,0,1,1,0,0     period 15, 8 ones
+/// ```
+///
+/// A brute-force search over every tap subset, both feedback polarities, both
+/// shift directions and every start state found **exactly one** machine
+/// reproducing it, up to the mirror convention: taps 0 and 3, XOR, shifting
+/// right. Eight ones in fifteen is the XOR signature (XOR excludes the all-zero
+/// state), which agrees independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Poly4 {
+    /// 4 bits; the output is bit 0.
+    pub shift: u8,
+}
+
+impl Default for Poly4 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Poly4 {
+    /// The state at the start of the measured window.
+    ///
+    /// This is **not** established to be the state at reset — the fixture idles
+    /// for tens of thousands of cycles before the window, so only the phase
+    /// within the sequence was observed, not its origin. Aligning the stream to
+    /// the core's absolute phase is what task #62's comparison does.
+    pub const RESET: u8 = 0b0001;
+
+    pub fn new() -> Self {
+        Poly4 { shift: Self::RESET }
+    }
+
+    pub fn step(&mut self) {
+        let fb = ((self.shift) ^ (self.shift >> 3)) & 1;
+        self.shift = ((self.shift >> 1) | (fb << 3)) & 0x0F;
+    }
+
+    pub fn bit(&self) -> bool {
+        self.shift & 1 != 0
+    }
+}
+
+/// The 5-bit polynomial counter.
+///
+/// **Measured, not transcribed**, by the same method as [`Poly4`] — but poly5
+/// cannot be read directly, and establishing that was most of the work.
+///
+/// Sweeping all eight distortion settings showed `0x2` and `0x6` producing
+/// identical output, and `0xA` and `0xE` likewise. That is the documented shape
+/// of `AUDC` bits 7:5 confirmed by measurement: **bit 7 selects whether poly5 is
+/// in the chain**, bits 6:5 pick poly17, poly4 or a pure tone after it. So no
+/// setting puts poly5's bit on the output; it only *gates* the stage behind it:
+///
+/// ```text
+/// AUDC  period (divider ticks)
+///  0x0  none          poly5 + poly17
+///  0x2  62            poly5 + pure tone
+///  0x4  465 = 15x31   poly5 + poly4
+///  0x6  62            poly5 + pure tone, same as 0x2
+///  0x8  none          poly17
+///  0xA  2             pure tone
+///  0xC  15            poly4
+///  0xE  2             pure tone, same as 0xA
+/// ```
+///
+/// 62 rather than 31 because the gated output *toggles*: an odd number of gate
+/// events per polynomial period doubles it. So poly5's sequence is in the
+/// output's **transitions**, and those recover it:
+///
+/// ```text
+/// 1,0,0,0,1,0,0,0,0,0,1,1,0,1,1,0,0,1,1,1,1,0,1,0,0,1,0,1,0,1,1
+/// period 31, 15 ones
+/// ```
+///
+/// Fifteen ones is odd, which is what predicted the 62-tick period, and it is
+/// also the XNOR signature (XNOR excludes the all-ones state; XOR would give
+/// 16). The search returned one machine in two mirror forms — taps 0,1,2,3 XNOR
+/// shifting right, equivalently taps 1,2,3,4 shifting left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Poly5 {
+    /// 5 bits; the output is bit 0.
+    pub shift: u8,
+}
+
+impl Default for Poly5 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Poly5 {
+    /// The state at the start of the measured window; see [`Poly4::RESET`] for
+    /// why this is a phase and not an origin.
+    pub const RESET: u8 = 0b10001;
+
+    pub fn new() -> Self {
+        Poly5 { shift: Self::RESET }
+    }
+
+    pub fn step(&mut self) {
+        let fb = !(self.shift & 0b0_1111).count_ones() as u8 & 1;
+        self.shift = ((self.shift >> 1) | (fb << 4)) & 0x1F;
+    }
+
+    pub fn bit(&self) -> bool {
+        self.shift & 1 != 0
     }
 }
 
@@ -358,5 +540,98 @@ mod tests {
         }
         assert_eq!(p.read(reg::ALLPOT, 10), 0, "no pot still counting");
         assert_eq!(p.read(reg::IRQST, 10), 0xFF, "active low: nothing pending");
+    }
+}
+
+#[cfg(test)]
+mod poly_tests {
+    use super::*;
+
+    /// The sequence read straight off the core's `SOUT` at `AUDC = 0xC`.
+    const POLY4_MEASURED: [u8; 15] = [1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0];
+
+    /// The transitions of the core's `SOUT` at `AUDC = 0x2`, one per divider
+    /// tick. Not the output level — poly5 only gates, so the sequence is in the
+    /// edges.
+    const POLY5_MEASURED: [u8; 31] = [
+        1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1,
+        1,
+    ];
+
+    fn run<F: FnMut() -> u8>(mut next: F, n: usize) -> Vec<u8> {
+        (0..n).map(|_| next()).collect()
+    }
+
+    #[test]
+    fn poly4_reproduces_the_measured_sequence() {
+        let mut p = Poly4::new();
+        let got = run(
+            || {
+                let b = p.bit() as u8;
+                p.step();
+                b
+            },
+            45,
+        );
+        for (i, chunk) in got.chunks(15).enumerate() {
+            assert_eq!(chunk, POLY4_MEASURED, "poly4 period {i}");
+        }
+    }
+
+    #[test]
+    fn poly5_reproduces_the_measured_sequence() {
+        let mut p = Poly5::new();
+        let got = run(
+            || {
+                let b = p.bit() as u8;
+                p.step();
+                b
+            },
+            93,
+        );
+        for (i, chunk) in got.chunks(31).enumerate() {
+            assert_eq!(chunk, POLY5_MEASURED, "poly5 period {i}");
+        }
+    }
+
+    /// The ones-counts are what pinned each polynomial's feedback polarity, and
+    /// poly5's odd count is what explains its output period being 62 ticks
+    /// rather than 31. If either changed, the identification would be wrong.
+    #[test]
+    fn the_ones_counts_are_the_ones_that_identified_the_polarity() {
+        assert_eq!(POLY4_MEASURED.iter().filter(|&&b| b == 1).count(), 8, "XOR");
+        assert_eq!(POLY5_MEASURED.iter().filter(|&&b| b == 1).count(), 15, "XNOR");
+    }
+
+    /// Both are maximal: every non-excluded state appears exactly once.
+    #[test]
+    fn both_polynomials_are_maximal_length() {
+        let mut p4 = Poly4::new();
+        let mut seen4 = std::collections::BTreeSet::new();
+        for _ in 0..15 {
+            assert!(seen4.insert(p4.shift), "poly4 repeated a state early");
+            p4.step();
+        }
+        assert_eq!(p4.shift, Poly4::RESET, "poly4 closed the cycle at 15");
+        assert!(!seen4.contains(&0), "XOR cannot reach the all-zero state");
+
+        let mut p5 = Poly5::new();
+        let mut seen5 = std::collections::BTreeSet::new();
+        for _ in 0..31 {
+            assert!(seen5.insert(p5.shift), "poly5 repeated a state early");
+            p5.step();
+        }
+        assert_eq!(p5.shift, Poly5::RESET, "poly5 closed the cycle at 31");
+        assert!(!seen5.contains(&0x1F), "XNOR cannot reach the all-ones state");
+    }
+
+    /// The divisors are measured; this records the relationship that confirmed
+    /// they are POKEY's two audio clocks and not some other pair of numbers.
+    #[test]
+    fn the_two_divisors_are_the_documented_clock_pair() {
+        assert_eq!(DIV_FAST, 28);
+        assert_eq!(DIV_SLOW, 114);
+        let ratio = f64::from(DIV_SLOW) / f64::from(DIV_FAST);
+        assert!((ratio - 63.9 / 15.7).abs() < 0.02, "ratio {ratio} is 64k:15k");
     }
 }
