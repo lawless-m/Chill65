@@ -103,6 +103,16 @@ pub struct Assembler<'a> {
     /// This is the authoritative self-modifying-code check that `smc-gate.md`
     /// promised: the Phase 0 scan could only read source text.
     pub store_targets: Vec<(String, u16, String)>,
+
+    /// The recorded IR, filled during pass two. See `crate::ir`.
+    pub ir: crate::ir::Ir,
+    /// Unit currently being assembled, for IR provenance.
+    ir_unit: String,
+    /// A run of non-instruction bytes being accumulated: `(addr, len)`.
+    ir_data: Option<(u16, u16)>,
+    /// True while an instruction's own bytes are being emitted, so `emit` does
+    /// not mistake them for data.
+    ir_in_instruction: bool,
     /// How often each macro was invoked, post-expansion.
     pub macro_uses: HashMap<String, usize>,
     /// Branch instructions emitted from inside an HLL65F expansion.
@@ -179,6 +189,10 @@ impl<'a> Assembler<'a> {
             errors: Vec::new(),
             warnings: Vec::new(),
             store_targets: Vec::new(),
+            ir: crate::ir::Ir::default(),
+            ir_unit: String::new(),
+            ir_data: None,
+            ir_in_instruction: false,
             macro_uses: HashMap::new(),
             branches_structured: 0,
             branches_direct: 0,
@@ -224,6 +238,9 @@ impl<'a> Assembler<'a> {
             self.errors.clear();
             self.warnings.clear();
             self.store_targets.clear();
+            self.ir = crate::ir::Ir::default();
+            self.ir_data = None;
+            self.ir_in_instruction = false;
             self.macro_uses.clear();
             self.branches_structured = 0;
             self.branches_direct = 0;
@@ -260,6 +277,8 @@ impl<'a> Assembler<'a> {
                     .unwrap_or_default();
                 self.global_decls.clear();
 
+                self.ir_unit = root_name.to_string();
+
                 let Some(raw) = self.provider.load(root_name) else {
                     self.errors
                         .push(format!("cannot open root source {root_name}"));
@@ -271,7 +290,13 @@ impl<'a> Assembler<'a> {
             }
         }
         if self.errors.is_empty() {
-            Ok(std::mem::take(&mut self.image))
+            // Operands are read back from the finished image: HLL65F branches
+            // are emitted with a self-pointing placeholder and patched later.
+            // See `Ir::resolve_operands_from`.
+            self.flush_ir_data();
+            let image = std::mem::take(&mut self.image);
+            self.ir.resolve_operands_from(&image);
+            Ok(image)
         } else {
             Err(std::mem::take(&mut self.errors))
         }
@@ -327,6 +352,24 @@ impl<'a> Assembler<'a> {
                         }
                         if self.pass == 1 {
                             self.define(name, self.loc, *global);
+                        } else {
+                            // Pass two, where `loc` is final: record the label
+                            // for the IR. Only address labels are recorded —
+                            // `=` assignments are constants, not places, and
+                            // routine segmentation wants places.
+                            self.flush_ir_data();
+                            let unit = self.ir_unit.clone();
+                            let at = self.loc;
+                            self.ir.events.push(crate::ir::Event::Label(crate::ir::Label {
+                                addr: at,
+                                name: name.to_string(),
+                                scope: if *global {
+                                    crate::ir::Scope::Global
+                                } else {
+                                    crate::ir::Scope::Unit
+                                },
+                                unit,
+                            }));
                         }
                         if *global && self.pass == 1 {
                             self.global_decls.insert(intern(name));
@@ -639,10 +682,32 @@ impl<'a> Assembler<'a> {
             }
         }
 
+        // Close any run of data bytes before the instruction's own bytes, so
+        // the IR reads in emission order.
+        self.flush_ir_data();
+        let ir_addr = self.loc;
+        self.ir_in_instruction = true;
+
         match encode::encode(mnemonic, mode, value, self.loc) {
             Ok(bytes) => {
+                let size = bytes.len() as u16;
                 for b in bytes {
                     self.emit(b);
+                }
+                if self.pass == 2 {
+                    let unit = self.ir_unit.clone();
+                    self.ir
+                        .events
+                        .push(crate::ir::Event::Instruction(crate::ir::Instruction {
+                            addr: ir_addr,
+                            mnemonic: up.clone(),
+                            mode,
+                            value,
+                            operand_text: operand_text(operand),
+                            size,
+                            chain: self.expanding.clone(),
+                            unit,
+                        }));
                 }
             }
             Err(e) => {
@@ -650,6 +715,7 @@ impl<'a> Assembler<'a> {
                 self.loc = self.loc.wrapping_add(encode::size_of(mode));
             }
         }
+        self.ir_in_instruction = false;
     }
 
     /// Capture a `.MACRO` body up to its matching `.ENDM`, nesting-aware.
@@ -1311,9 +1377,57 @@ impl<'a> Assembler<'a> {
     fn emit(&mut self, b: u8) {
         if self.pass == 2 {
             self.image.insert(self.loc, b);
+            if !self.ir_in_instruction {
+                // Anything not emitted by `instruction` is data: a directive,
+                // a table, storage. Runs are coalesced so a 4K table is one
+                // event rather than four thousand.
+                match self.ir_data {
+                    Some((addr, len)) if addr.wrapping_add(len) == self.loc => {
+                        self.ir_data = Some((addr, len + 1));
+                    }
+                    _ => {
+                        self.flush_ir_data();
+                        self.ir_data = Some((self.loc, 1));
+                    }
+                }
+            }
         }
         self.loc = self.loc.wrapping_add(1);
     }
+
+    /// Close any open run of data bytes and record it.
+    fn flush_ir_data(&mut self) {
+        if let Some((addr, len)) = self.ir_data.take() {
+            let unit = self.ir_unit.clone();
+            self.ir.events.push(crate::ir::Event::Data(crate::ir::Data {
+                addr,
+                len,
+                chain: self.expanding.clone(),
+                unit,
+            }));
+        }
+    }
+}
+
+/// The operand as it was written, flattened back to a string.
+///
+/// For reading the IR, and for the emitter to quote in a comment beside the
+/// code it generates — an address alone is a poor thing to debug against.
+fn operand_text(operand: &[Token]) -> String {
+    let mut out = String::new();
+    for t in operand {
+        match &t.tok {
+            Tok::Symbol(n) => out.push_str(n),
+            Tok::Number { text, .. } => out.push_str(text),
+            Tok::Punct(c) => out.push(*c),
+            Tok::Prefix(m) => out.push_str(match m {
+                Mode::I => "#",
+                _ => "@",
+            }),
+            other => out.push_str(&format!("{other:?}")),
+        }
+    }
+    out
 }
 
 fn comma_token() -> Token {
@@ -1470,6 +1584,96 @@ mod tests {
         let p = provider(files);
         let mut a = Assembler::new(&p);
         a.assemble("MAIN.MAC")
+    }
+
+    /// Assemble and hand back both the image and the recorded IR.
+    fn asm_ir(files: &[(&str, &str)]) -> (BTreeMap<u16, u8>, crate::ir::Ir) {
+        let p = provider(files);
+        let mut a = Assembler::new(&p);
+        let img = a.assemble("MAIN.MAC").expect("assembly failed");
+        (img, a.ir.clone())
+    }
+
+    #[test]
+    fn the_ir_re_encodes_to_the_image_it_recorded() {
+        // The assertion that the IR *is* the program rather than a plausible
+        // story about it.
+        let (img, ir) = asm_ir(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             START:	LDA I,012\n\
+             	STA 0200\n\
+             	LDX 0FF\n\
+             LOOP:	DEX\n\
+             	BNE LOOP\n\
+             	RTS\n",
+        )]);
+        assert_eq!(ir.check_against(&img), Vec::<String>::new());
+        assert_eq!(ir.instructions().count(), 6);
+    }
+
+    #[test]
+    fn the_ir_records_addresses_sizes_and_operand_text() {
+        let (_, ir) = asm_ir(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             	LDA I,012\n\
+             	STA 0200\n",
+        )]);
+        let i: Vec<_> = ir.instructions().collect();
+        assert_eq!(i[0].addr, 0xA000);
+        assert_eq!(i[0].mnemonic, "LDA");
+        assert_eq!(i[0].size, 2);
+        assert_eq!(i[1].addr, 0xA002);
+        assert_eq!(i[1].size, 3);
+        assert!(i[1].operand_text.contains("0200"), "{:?}", i[1].operand_text);
+    }
+
+    #[test]
+    fn the_ir_separates_data_runs_from_instructions() {
+        let (_, ir) = asm_ir(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             	LDA I,01\n\
+             TABLE:	.BYTE 1,2,3,4\n\
+             	RTS\n",
+        )]);
+        let data: Vec<_> = ir.data().collect();
+        assert_eq!(data.len(), 1, "the four bytes coalesce into one run");
+        assert_eq!(data[0].addr, 0xA002);
+        assert_eq!(data[0].len, 4);
+        assert_eq!(ir.instructions().count(), 2, "data is not an instruction");
+    }
+
+    #[test]
+    fn the_ir_records_label_scope_as_the_source_declares_it() {
+        let (_, ir) = asm_ir(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             PRIV:	RTS\n\
+             SHARED::	RTS\n",
+        )]);
+        let by = |n: &str| ir.labels().find(|l| l.name == n).cloned();
+        assert_eq!(by("PRIV").expect("PRIV").scope, crate::ir::Scope::Unit);
+        assert_eq!(by("SHARED").expect("SHARED").scope, crate::ir::Scope::Global);
+    }
+
+    #[test]
+    fn the_ir_carries_the_macro_chain_that_emitted_each_instruction() {
+        let (_, ir) = asm_ir(&[(
+            "MAIN.MAC",
+            "	.MACRO WRAP\n\
+             	LDA I,07\n\
+             	.ENDM\n\
+             	.=0A000\n\
+             	WRAP\n\
+             	RTS\n",
+        )]);
+        let i: Vec<_> = ir.instructions().collect();
+        assert_eq!(i[0].chain, vec!["WRAP".to_string()], "expanded from WRAP");
+        assert!(i[1].chain.is_empty(), "the RTS was written directly");
+        assert!(i[0].expanded_from(&["WRAP"]));
+        assert!(!i[1].expanded_from(&["WRAP"]));
     }
 
     fn bytes(img: &BTreeMap<u16, u8>, from: u16, n: usize) -> Vec<u8> {

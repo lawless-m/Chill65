@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! chill65-asm <root.MAC> --include-dir DIR [--include-dir DIR2 ...]
-//!             [-o out.bin] [--symbols out.sym] [--base ADDR] [--end ADDR]
+//!             [-o out.bin] [--symbols out.sym] [--ir out.ir]
+//!             [--base ADDR] [--end ADDR]
 //! ```
 //!
 //! Include directories are searched in order, which is what lets the program be
@@ -54,6 +55,7 @@ fn main() {
     let mut dirs = Vec::new();
     let mut out = None;
     let mut symfile = None;
+    let mut irfile: Option<PathBuf> = None;
     let mut base: Option<u16> = None;
     let mut end: Option<u16> = None;
 
@@ -68,6 +70,7 @@ fn main() {
             "--include-dir" | "-I" => dirs.push(PathBuf::from(next(&mut i))),
             "-o" | "--output" => out = Some(PathBuf::from(next(&mut i))),
             "--symbols" => symfile = Some(PathBuf::from(next(&mut i))),
+            "--ir" => irfile = Some(PathBuf::from(next(&mut i))),
             "--base" => base = u16::from_str_radix(&next(&mut i), 16).ok(),
             "--end" => end = u16::from_str_radix(&next(&mut i), 16).ok(),
             "-h" | "--help" => usage(),
@@ -104,6 +107,19 @@ fn main() {
             }
             if let Some(path) = symfile {
                 write_symbols(&asm, &path);
+            }
+            if let Some(path) = &irfile {
+                // Game-derived when run against the corpus: write under
+                // target/, never commit (plan section 9).
+                if let Err(e) = std::fs::write(path, asm.ir.dump()) {
+                    eprintln!("cannot write {}: {e}", path.display());
+                    std::process::exit(1);
+                }
+                eprintln!(
+                    "wrote {} IR events to {}",
+                    asm.ir.events.len(),
+                    path.display()
+                );
             }
         }
         Err(errors) => {

@@ -20,5 +20,6 @@ pub mod assemble;
 pub mod directives;
 pub mod encode;
 pub mod expr;
+pub mod ir;
 pub mod lexer;
 pub mod macros;
