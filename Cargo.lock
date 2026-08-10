@@ -7,5 +7,12 @@ name = "chill65-asm"
 version = "0.1.0"
 
 [[package]]
+name = "chill65-diff"
+version = "0.1.0"
+dependencies = [
+ "chill65-runtime",
+]
+
+[[package]]
 name = "chill65-runtime"
 version = "0.1.0"
