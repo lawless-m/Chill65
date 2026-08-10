@@ -13,7 +13,7 @@ own colour RAM. No game code or ROMs are distributed here; see below.*
 
 ## Status
 
-**Phases 0 through 4 complete and gated.**
+**Phases 0 through 5 complete and gated.**
 
 **Phase 1 — the assembler.** `chill65-asm` reassembles the original Atari source
 to output byte-identical with the original toolchain's own: 24,576 bytes of
@@ -98,8 +98,36 @@ of its hottest code — recovered as a block-dispatch state machine. Emitted gam
 Rust is generated into `OUT_DIR` and never committed; what is committed is a
 list of routine names.
 
-Windowing and audio are deliberately out of scope; the core stays headless and
-dependency-free.
+**Phase 5 — the browser.** `chill65-wasm` builds the machine for
+`wasm32-unknown-unknown` behind a hand-written C ABI — no `wasm-bindgen`, no
+generated glue, and the module requires **no imports at all**. A Node harness
+plays each committed trace through it and compares the per-frame hash stream
+against the native interpreter's: **13,492 frames identical**, on all five
+traces, with compiled dispatch off and on.
+
+```
+CHILL65_CORPUS=/path/to/crystal-castles \
+  cargo build -p chill65-wasm --target wasm32-unknown-unknown --release
+bash tools/stage-web.sh
+python3 -m http.server --directory target/web 8000
+```
+
+The ROM images are handed in from JavaScript rather than loaded, since
+`wasm32-unknown-unknown` has no filesystem — which is also the distribution
+posture enforcing itself. The built `.wasm` is game-derived and stays under
+`target/`.
+
+Two measurements came out of it. All four combinations of target and dispatch
+clear the board's 61.035 Hz by 41× or better, WebAssembly costing 15–18% against
+native. And **compiled dispatch is about twice as slow as interpreting on both
+targets** — so the block-dispatch state machine is a poor shape everywhere, not
+a WebAssembly problem. Separately, 85% of the game's hand-written control flow
+is *reducible*, so most of that state machine could become native `loop`/`if`.
+Both are recorded in `wasm.md` and neither is acted on.
+
+**Motion objects are not modelled**, so the browser page draws the castle and
+the crystals and no characters. Windowing and audio remain out of scope; the
+core stays headless and dependency-free.
 
 See `atari-recompiler-plan.md` for the full plan, and:
 
@@ -119,6 +147,8 @@ See `atari-recompiler-plan.md` for the full plan, and:
 | `gate3.md` | The Phase 3 gate: fault injection localised to its frame and routine, and what the harness found |
 | `codegen.md` | **The Phase 4 deliverable.** The IR, the contract generated code targets, the four lowering buckets measured, and what resisted |
 | `gate4.md` | The Phase 4 gate: a majority of executed instructions compiled, indistinguishable from interpreting them |
+| `wasm.md` | **The Phase 5 deliverable.** The constraints WebAssembly imposed and how each was resolved, reducibility answered, size and performance measured |
+| `gate5.md` | The Phase 5 gate: the wasm build's frame hashes identical to native on every trace, both dispatch modes |
 | `LOOP.md` | Working scope and stop conditions |
 
 ## You must supply your own game source
@@ -147,8 +177,10 @@ crates/chill65-asm/       assembler front end for the Atari MACRO-11 dialect
 crates/chill65-runtime/   6502 interpreter and Crystal Castles machine model
 crates/chill65-diff/      differential harness: traces, oracles, divergence localisation
 crates/chill65-native/    compiled routines, generated at build time and dispatched
+crates/chill65-wasm/      the machine as a WebAssembly module, hand-written C ABI
+web/                      the browser page, and the Node scripts that check the module
 traces/                   recorded input traces (our own work, not game-derived)
-tools/                    Python analysis scripts (LDA decoder, source scanners)
+tools/                    Python analysis scripts, and the web staging script
 ```
 
 ## Build
