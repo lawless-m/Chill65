@@ -97,7 +97,9 @@ assert.ok(
   'every pixel should be opaque',
 );
 
-const hash = wasm.frame_hash().toString(16).padStart(16, '0');
+// `i64` reaches JavaScript as a *signed* BigInt, so a hash with its top bit
+// set arrives negative. Reinterpret before formatting.
+const hash = BigInt.asUintN(64, wasm.frame_hash()).toString(16).padStart(16, '0');
 // Dispatch entries, not routines: a state-machine routine registers every
 // block so the dispatch can resume it. Zero means a corpus-free build.
 const entries = typeof wasm.dispatch_entries === 'function' ? wasm.dispatch_entries() : 0;
