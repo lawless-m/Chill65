@@ -24,6 +24,9 @@
 	.MACRO BEGIN
 	.ENDM
 
-	.MACRO NEEND TOP
+; Note the inversion here too: EQEND names the condition that ENDS the loop, and
+; emits the inverse branch back to the top. dialect.md records the real
+; package's `BEGIN … PLEND` assembling to `BMI -3`.
+	.MACRO EQEND TOP
 	BNE TOP
 	.ENDM

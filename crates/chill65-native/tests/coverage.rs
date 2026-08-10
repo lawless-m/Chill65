@@ -101,14 +101,15 @@ fn every_trace_verifies_and_the_metric_reports() {
     );
     assert!(total > 0, "no instructions executed at all");
 
-    // The manifest is empty until migration begins, so this is the baseline.
-    // When it stops being true, replace the assertion rather than delete it.
-    assert_eq!(
-        compiled_total,
-        Registry::game()
-            .is_empty()
-            .then_some(0)
-            .unwrap_or(compiled_total),
-        "with an empty manifest nothing should be compiled"
-    );
+    // Whatever the manifest says must be reflected in the measurement: an
+    // empty one compiles nothing, a populated one must actually be running.
+    if Registry::game().is_empty() {
+        assert_eq!(compiled_total, 0, "an empty manifest compiled something");
+    } else {
+        assert!(
+            compiled_total > 0,
+            "{} routines are in the manifest but none of them executed",
+            Registry::game().len()
+        );
+    }
 }

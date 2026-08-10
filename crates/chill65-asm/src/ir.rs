@@ -115,8 +115,10 @@ pub enum Marker {
     IfClose,
     /// `BEGIN` — opens a loop.
     LoopOpen,
-    /// `EQEND`, `PLEND`, … — closes a loop, branching back while the condition
-    /// holds.
+    /// `EQEND`, `PLEND`, … — closes a loop. The condition named is the one that
+    /// **ends** it, and the branch emitted is the inverse, taken to go round
+    /// again: `dialect.md` records `BEGIN … PLEND` assembling to `ea 30 fd`, a
+    /// `BMI` backwards.
     LoopClose { cond: String },
     /// `EQCONT`, `PLCONT`, `CONTINUE` — jump back to the loop head.
     LoopContinue { cond: String },

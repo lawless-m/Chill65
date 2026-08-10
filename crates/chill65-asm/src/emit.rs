@@ -226,11 +226,26 @@ fn condition(cond: &str) -> Option<&'static str> {
 
 /// A routine's events, in emission order.
 ///
-/// Membership is decided by **address range**, not by the last instruction
-/// seen. A construct's opening marker is recorded at the address of the first
-/// instruction it governs, so `BEGIN` as a routine's first statement sits at the
-/// routine's own entry address — and a running "am I inside yet" flag would drop
-/// it, silently unbalancing the structure.
+/// Membership is by **address**, with the boundaries decided deliberately.
+///
+/// A marker is recorded at the location the construct macro was invoked, which
+/// is the address of the next instruction to be emitted. So an *opening* marker
+/// sits on the first instruction it governs, and a *closing* marker sits on the
+/// first instruction after the block. When a block ends a routine, that closer
+/// therefore lands on the **next routine's** entry address.
+///
+/// Left naive, that drops the closer and the routine reads as unbalanced —
+/// which is exactly what happened to `MN.ST` and `MN.FRA`, the two hottest
+/// routines in the game. So:
+///
+/// - interior markers belong here;
+/// - an opener on the entry address belongs here (a routine opening with
+///   `BEGIN`);
+/// - a closer on the end address belongs here, not to whatever follows;
+/// - and correspondingly a closer on the *entry* address belongs to the
+///   previous routine, not this one.
+///
+/// Each marker thus lands in exactly one routine.
 fn routine_events<'a>(ir: &'a Ir, name: &str) -> Vec<&'a Event> {
     let mut lo = u16::MAX;
     let mut hi = 0u16;
@@ -250,7 +265,15 @@ fn routine_events<'a>(ir: &'a Ir, name: &str) -> Vec<&'a Event> {
         .iter()
         .filter(|e| match e {
             Event::Instruction(i) => i.routine.as_deref() == Some(name),
-            Event::Marker { addr, .. } => *addr >= lo && *addr < hi,
+            Event::Marker { marker, addr, .. } => {
+                if *addr == lo {
+                    !marker.closes()
+                } else if *addr == hi {
+                    marker.closes()
+                } else {
+                    *addr > lo && *addr < hi
+                }
+            }
             _ => false,
         })
         .collect()
@@ -397,6 +420,14 @@ impl Emitter<'_> {
                             }) = events.get(*at).copied()
                             {
                                 *at += 1;
+                                // `ELSE` emits an unconditional `JMP` over the
+                                // else-block (HLL65F.MAC's ELSE: `JMP .`, its
+                                // target back-patched by FND). That jump ends
+                                // the *if* branch, but it appears after the
+                                // marker, so it is charged here — inside the
+                                // `if` — and its jump is replaced by the Rust
+                                // else.
+                                self.charge_jump(events, at, out, indent + 1, lowered)?;
                                 writeln!(out, "{pad}}} else {{").unwrap();
                                 self.block(events, at, out, indent + 1, lowered)?;
                             }
@@ -414,9 +445,8 @@ impl Emitter<'_> {
                             writeln!(out, "{pad}loop {{").unwrap();
                             self.block(events, at, out, indent + 1, lowered)?;
 
-                            // The loop's closing construct branches *back* while
-                            // its condition holds, so the loop exits when it
-                            // does not.
+                            // The loop's closing construct names the condition
+                            // that ENDS it, so the loop breaks when it holds.
                             let inner = " ".repeat((indent + 1) * 4);
                             match events.get(*at).copied() {
                                 Some(Event::Marker {
@@ -427,19 +457,23 @@ impl Emitter<'_> {
                                     let test = condition(cond).ok_or_else(|| {
                                         format!("condition {cond} has no lowering")
                                     })?;
-                                    // A loop's closing branch is *not*
-                                    // inverted: it is taken when its condition
-                                    // holds, which is when the loop continues.
+                                    // A loop's closing construct names its
+                                    // EXIT condition, and emits the inverse
+                                    // branch back to the top: dialect.md
+                                    // records `BEGIN … PLEND` assembling to
+                                    // `ea 30 fd`, a BMI backwards. So the
+                                    // branch is taken while the loop continues
+                                    // — when the test does *not* hold.
                                     self.charge_branch(
                                         events,
                                         at,
                                         out,
                                         indent + 1,
                                         test,
-                                        true,
+                                        false,
                                         lowered,
                                     )?;
-                                    writeln!(out, "{inner}if !({test}) {{ break; }}").unwrap();
+                                    writeln!(out, "{inner}if {test} {{ break; }}").unwrap();
                                 }
                                 _ => return Err("loop is not closed".into()),
                             }
@@ -525,6 +559,41 @@ impl Emitter<'_> {
             (String::from("2"), taken.to_string())
         };
         writeln!(out, "{pad}machine.tick(if {test} {{ {yes} }} else {{ {no} }});").unwrap();
+        writeln!(out, "{pad}done += 1;").unwrap();
+        Ok(())
+    }
+
+    /// Charge an unconditional jump's cycles without emitting its jump.
+    fn charge_jump(
+        &mut self,
+        events: &[&Event],
+        at: &mut usize,
+        out: &mut String,
+        indent: usize,
+        lowered: &mut usize,
+    ) -> Result<(), String> {
+        let pad = " ".repeat(indent * 4);
+        let Some(Event::Instruction(i)) = events.get(*at).copied() else {
+            return Err("ELSE emitted no jump".into());
+        };
+        if i.mnemonic != "JMP" {
+            return Err(format!(
+                "expected ELSE's jump, found {} at {:04X}",
+                i.mnemonic, i.addr
+            ));
+        }
+        *at += 1;
+        *lowered += 1;
+        writeln!(out, "{pad}// {:04X} JMP — ELSE's jump over the else-block", i.addr).unwrap();
+        writeln!(
+            out,
+            "{pad}if machine.cycles >= deadline || (machine.irq_pending && \
+             !cpu.interrupt_disable) {{ cpu.pc = 0x{:04X}; return done; }}",
+            i.addr
+        )
+        .unwrap();
+        writeln!(out, "{pad}machine.begin_instruction(0x{:04X});", i.addr).unwrap();
+        writeln!(out, "{pad}machine.tick(3);").unwrap();
         writeln!(out, "{pad}done += 1;").unwrap();
         Ok(())
     }

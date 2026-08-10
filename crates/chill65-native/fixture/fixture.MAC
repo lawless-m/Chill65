@@ -27,7 +27,7 @@ SKIP:	ENDIF
 	LDX I,04
 	BEGIN
 TOP:	DEX
-	NEEND TOP
+	EQEND TOP
 	RTS
 
 ; The interrupt handler: acknowledge, pet the watchdog, return. Acknowledging

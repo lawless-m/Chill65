@@ -7,3 +7,10 @@
 # Empty until migration begins. Add a name, rebuild, then prove it with
 #   cargo run -p chill65-native --bin ccnative -- verify --trace traces/<t>.trace
 # on every committed trace before adding the next.
+RS.INI
+WV.BDR
+ROMTS1
+LN.F1
+LN.F2
+SQ.LDR
+SQ.SQD

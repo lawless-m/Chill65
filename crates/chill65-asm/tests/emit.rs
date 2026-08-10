@@ -117,9 +117,10 @@ fn a_structured_loop_becomes_a_rust_loop() {
     );
     assert!(e.refused.is_empty(), "refused: {:?}", e.refused);
     assert!(e.source.contains("loop {"), "{}", e.source);
-    // The loop branches back while its condition holds, so it exits when it
-    // does not.
-    assert!(e.source.contains("if !(cpu.zero) { break; }"), "{}", e.source);
+    // The construct names the condition that ENDS the loop, and emits the
+    // inverse branch back to the top (dialect.md: `BEGIN … PLEND` assembles to
+    // `BMI -3`). So the lowering breaks when the condition holds.
+    assert!(e.source.contains("if cpu.zero { break; }"), "{}", e.source);
 }
 
 #[test]
