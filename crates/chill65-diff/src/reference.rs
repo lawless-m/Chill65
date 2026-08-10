@@ -34,15 +34,44 @@ pub struct Frame {
     /// pixels is 107 MB, so a divergence *search* keeps hashes alone and only
     /// the frames around a divergence are re-run for pixels.
     pub rgb: Option<Vec<u8>>,
+    /// When this frame was captured, in emulated CPU cycles since power-on, or
+    /// `None` from a reference that cannot say.
+    ///
+    /// **The point of this field.** The harness compares frame *N* against
+    /// frame *N* and reports the first index that differs, which silently
+    /// assumes the two are the same frame. Nothing established that, and §12 of
+    /// `harness.md` shows the assumption does not hold: 161 frames of apparent
+    /// agreement were 161 frames in which both sides were blank, and the
+    /// oracle's picture gains content a frame or two after ours. A stamp on
+    /// every frame turns the offset from an assumption into a measurement.
+    ///
+    /// Units are CPU cycles at 1.25 MHz — 20,480 to a frame — because that is
+    /// the one quantity all three implementations can express. It is *emulated
+    /// time*, not instructions retired.
+    pub cycles: Option<u64>,
 }
 
 impl Frame {
     /// Hash `rgb`, retaining the bytes only if `keep`.
+    ///
+    /// Unstamped: a reference that knows its capture instant adds it with
+    /// [`Frame::at`].
     pub fn new(rgb: Vec<u8>, keep: bool) -> Frame {
         Frame {
             hash: fnv1a(&rgb),
             rgb: if keep { Some(rgb) } else { None },
+            cycles: None,
         }
+    }
+
+    /// Stamp the frame with the emulated cycle count at which it was captured.
+    ///
+    /// Never folded into [`Frame::hash`], which stays FNV-1a over the RGB bytes
+    /// and nothing else — two implementations agreeing about a picture must go
+    /// on agreeing whether or not they can date it.
+    pub fn at(mut self, cycles: u64) -> Frame {
+        self.cycles = Some(cycles);
+        self
     }
 }
 
@@ -133,5 +162,18 @@ mod tests {
             Frame::new(rgb.clone(), true).hash,
             Frame::new(rgb, false).hash
         );
+    }
+
+    #[test]
+    fn a_stamp_does_not_disturb_the_hash() {
+        // Frames are compared on the picture. Dating one must not change what
+        // it is, or an oracle that can say when a frame was captured would stop
+        // agreeing with one that cannot.
+        let rgb = vec![4u8, 5, 6];
+        let plain = Frame::new(rgb.clone(), false);
+        let stamped = Frame::new(rgb, false).at(20_480);
+        assert_eq!(plain.hash, stamped.hash);
+        assert_eq!(plain.cycles, None);
+        assert_eq!(stamped.cycles, Some(20_480));
     }
 }

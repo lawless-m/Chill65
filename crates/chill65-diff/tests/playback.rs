@@ -146,3 +146,56 @@ fn playback_is_deterministic_and_input_reaches_the_machine() {
         first[diverged], busy_hashes[diverged]
     );
 }
+
+/// Our frames carry the cycle count at which they were captured.
+///
+/// The stamp is what makes a timebase calibration against an external oracle
+/// possible at all (`harness.md` §12): comparing frame *N* to frame *N* assumes
+/// the two are the same frame, and nothing established that. A stamp turns the
+/// offset into something measurable.
+///
+/// What is asserted here is only our side's arithmetic — monotonic, and one
+/// frame period apart, allowing for the overshoot `run_frame` necessarily has.
+#[test]
+#[ignore = "needs CHILL65_CORPUS pointing at the game source"]
+fn frames_are_stamped_with_the_cycle_they_were_captured_at() {
+    let Some(corpus) = corpus() else {
+        eprintln!("CHILL65_CORPUS unset — skipping");
+        return;
+    };
+    let images = build_images(&corpus).expect("images");
+    let mut ours = OurRuntime::new(images.prog, images.data);
+    let trace = Trace::idle(FRAMES as usize);
+
+    let play = ours.play(&trace, FRAMES).expect("playback");
+    assert_eq!(play.stamps.len(), FRAMES as usize, "one stamp per frame");
+
+    const PERIOD: u64 = chill65_runtime::frame::CYCLES_PER_FRAME as u64;
+
+    // A frame ends on the first instruction boundary at or past the deadline,
+    // so each stamp sits at or just above (k+1) * PERIOD, and the excess is
+    // carried into the next frame rather than reset.
+    // The ceiling is derived rather than fitted: a frame can overrun its
+    // deadline by less than one instruction, and the longest 6502 instruction
+    // is 7 cycles, so the accumulated excess after k frames is under 7k.
+    // Measured, it is far tighter — 528 cycles over 600 frames — and that 528
+    // is exactly the excess in the attract figure `attract.rs` gates,
+    // 12,288,528 against 600 * 20,480 = 12,288,000.
+    let mut worst = 0u64;
+    for (k, &stamp) in play.stamps.iter().enumerate() {
+        let floor = (k as u64 + 1) * PERIOD;
+        let ceiling = floor + 7 * (k as u64 + 1);
+        assert!(stamp >= floor, "frame {k} stamped {stamp}, below {floor}");
+        assert!(stamp < ceiling, "frame {k} stamped {stamp}, at or past {ceiling}");
+        worst = worst.max(stamp - floor);
+    }
+    eprintln!("stamps: worst overshoot {worst} cycles over {FRAMES} frames");
+
+    for pair in play.stamps.windows(2) {
+        assert!(pair[1] > pair[0], "stamps must strictly increase: {pair:?}");
+    }
+
+    // The last stamp is the run's total, which `attract.rs` gates at
+    // 12,288,528 for 600 idle frames.
+    assert_eq!(*play.stamps.last().expect("frames"), play.cycles);
+}

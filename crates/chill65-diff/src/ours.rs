@@ -25,6 +25,13 @@ pub struct Snapshot {
 /// that happened.
 pub struct Playback {
     pub hashes: Vec<u64>,
+    /// Emulated CPU cycles elapsed at each frame's capture, one per frame and
+    /// index-aligned with `hashes`.
+    ///
+    /// `cycles` below is the total at the end of the run; this is the running
+    /// value at every frame boundary, which is what a timebase calibration
+    /// against an oracle needs.
+    pub stamps: Vec<u64>,
     pub cycles: u64,
     pub watchdog_expired: bool,
     /// Instructions the interpreter executed.
@@ -120,11 +127,17 @@ impl OurRuntime {
         compiled: &mut impl Compiled,
     ) -> Result<Playback, String> {
         let mut hashes = Vec::with_capacity(frames as usize);
+        let mut stamps = Vec::with_capacity(frames as usize);
         let (machine, interpreted) = self.drive_with(trace, frames, false, compiled, |m| {
             hashes.push(Frame::new(rgb_from_indices(&m.framebuffer(), &m.video.cram), false).hash);
+            // The actual count, not a multiple of CYCLES_PER_FRAME: `run_frame`
+            // stops at an instruction boundary, so a frame overshoots by up to
+            // one instruction's worth of cycles and the overshoot accumulates.
+            stamps.push(m.cycles);
         })?;
         Ok(Playback {
             hashes,
+            stamps,
             cycles: machine.cycles,
             watchdog_expired: machine.watchdog_expired,
             interpreted,
@@ -168,7 +181,9 @@ impl Reference for OurRuntime {
         let mut out = Vec::with_capacity(frames as usize);
         self.drive(trace, frames, false, |machine| {
             let rgb = rgb_from_indices(&machine.framebuffer(), &machine.video.cram);
-            out.push(Frame::new(rgb, want_pixels));
+            // Stamped at the same instant the picture is taken, which is the
+            // frame boundary: `drive` calls this after `run_frame` returns.
+            out.push(Frame::new(rgb, want_pixels).at(machine.cycles));
         })?;
         Ok(out)
     }
