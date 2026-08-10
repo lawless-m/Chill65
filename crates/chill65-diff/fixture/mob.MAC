@@ -1,0 +1,181 @@
+; A motion-object geometry fixture.
+;
+; ORIGINAL WORK. Nothing here comes from the game source, and it is committable
+; for the same reason `chill65-native/fixture/fixture.MAC` is: it is a program
+; we wrote, exercising hardware we modelled.
+;
+; # Why it exists
+;
+; Sprite geometry cannot be calibrated on a recorded trace of the game. Our
+; runtime and an oracle are not in the same game state during one — measured on
+; `gameplay.trace`, at frame 600 our object table is parked while MAME draws
+; four characters, and at frame 960 both have objects but different ones in
+; different places. No sprite model can reconcile that, so the comparison says
+; nothing about geometry.
+;
+; This program removes the game from the question. It plants a known object
+; table, never touches it again, and loops. Whatever an implementation draws is
+; then a function of the sprite hardware alone, and two implementations
+; disagreeing have disagreed about the hardware.
+;
+; # What it plants
+;
+; Nine objects, chosen to pin one thing each:
+;
+;   0  mid-screen, the reference
+;   1  the same picture one row down, so the vertical step is visible
+;   2  x = 0 and 3  x = 248, the two horizontal extremes
+;   4  x = 252, which must wrap across the right edge
+;   5  MPI set over a bright bitmap pixel, which the bitmap should win
+;   6  MPI set over a dim one, which the object should win
+;   7  colour 0, which is opaque even under priority (see `cram_address`)
+;   8  a second row of the same picture, for the vertical extent
+;
+; Every other entry is parked at F0 in all four bytes: a vertical position of
+; F0 puts the match window at VC 00-0F, which no visible line reaches.
+
+	.=0E000
+
+; ---------------------------------------------------------------- entry
+START::	SEI
+	CLD
+	LDX I,0FF
+	TXS
+
+; The OUT1 latch, one bit per address, sampling D3. Zero everything: MT.BSL
+; clear selects the 8E00 table, PLAYER2 clear means no cocktail flip.
+	LDA I,00
+	STA 09F00
+	STA 09F01
+	STA 09F02
+	STA 09F03
+	STA 09F04
+	STA 09F05
+	STA 09F06
+	STA 09F07
+
+; Colour RAM. Writes land at BA[4:0] with BA[5] supplying the ninth bit, so
+; 9F80+n sets entry n with bit 8 clear and 9FA0+n sets it with bit 8 set.
+; Entry 16 — what a bitmap pixel of zero selects — is set to 1FF, which is
+; black, because every component is active-low. The motion colours are left at
+; entry 0, which decodes to white.
+	LDA I,0FF
+	STA 09FB0
+
+; ---------------------------------------------------------- park the table
+; All 64 entries, F0 in every byte.
+	LDA I,0F0
+	LDX I,00
+PARK:	STA AX,08E00
+	STA AX,08F00
+	INX
+	BNE PARK
+
+; --------------------------------------------------------- plant the objects
+; Byte 0 picture, byte 1 vertical position, byte 2 bit 7 = MPI, byte 3
+; horizontal position. A vertical position of V puts the object's first row on
+; the line where VC + V first reaches F0, so V = F0 - line.
+
+; 0: picture 1 at line 64, x 64.
+	LDA I,01
+	STA 08E00
+	LDA I,0B0
+	STA 08E01
+	LDA I,00
+	STA 08E02
+	LDA I,040
+	STA 08E03
+
+; 1: the same picture sixteen lines lower, directly beneath it.
+	LDA I,01
+	STA 08E04
+	LDA I,0A0
+	STA 08E05
+	LDA I,00
+	STA 08E06
+	LDA I,040
+	STA 08E07
+
+; 2: hard against the left edge.
+	LDA I,01
+	STA 08E08
+	LDA I,0B0
+	STA 08E09
+	LDA I,00
+	STA 08E0A
+	LDA I,00
+	STA 08E0B
+
+; 3: the last object fully on screen.
+	LDA I,01
+	STA 08E0C
+	LDA I,0B0
+	STA 08E0D
+	LDA I,00
+	STA 08E0E
+	LDA I,0F8
+	STA 08E0F
+
+; 4: four pixels off the right edge, so half of it must wrap to x 0-3.
+	LDA I,01
+	STA 08E10
+	LDA I,0B0
+	STA 08E11
+	LDA I,00
+	STA 08E12
+	LDA I,0FC
+	STA 08E13
+
+; 5: priority set, at line 96.
+	LDA I,01
+	STA 08E14
+	LDA I,090
+	STA 08E15
+	LDA I,080
+	STA 08E16
+	LDA I,060
+	STA 08E17
+
+; 6: priority clear, beside it, so the pair differ only in MPI.
+	LDA I,01
+	STA 08E18
+	LDA I,090
+	STA 08E19
+	LDA I,00
+	STA 08E1A
+	LDA I,070
+	STA 08E1B
+
+; 7: picture 2, whose pixels are colour 0 — opaque even under priority.
+	LDA I,02
+	STA 08E1C
+	LDA I,090
+	STA 08E1D
+	LDA I,080
+	STA 08E1E
+	LDA I,080
+	STA 08E1F
+
+; 8: picture 3 at line 128, for a second vertical reference.
+	LDA I,03
+	STA 08E20
+	LDA I,070
+	STA 08E21
+	LDA I,00
+	STA 08E22
+	LDA I,0A0
+	STA 08E23
+
+; ------------------------------------------------------------------ idle
+; Nothing further touches the table. The watchdog is strobed so the machine
+; stays alive; a board that stopped being petted would reset and the picture
+; would go away.
+IDLE::	STA 09E00
+	JMP IDLE
+
+; Vectors. No interrupts are taken — I is set and never cleared — but the
+; vectors must exist.
+	.=0FFFA
+	.WORD START
+	.WORD START
+	.WORD START

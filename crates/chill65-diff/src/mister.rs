@@ -149,8 +149,20 @@ pub fn capture(corpus: &Path, frames: u32) -> Result<Capture, String> {
 
 /// Build if needed, then run the core driven from `trace`.
 pub fn capture_trace(corpus: &Path, trace: &Trace, frames: u32) -> Result<Capture, String> {
-    let exe = build()?;
     let roms = rom_blob(corpus)?;
+    capture_blob(&roms, trace, frames)
+}
+
+/// As [`capture_trace`], but from a ROM blob prepared by the caller.
+///
+/// The simulation reads its seven devices as a flat file and checks nothing
+/// about them, so this will boot **a program of ours** — which is what makes
+/// the core usable as an oracle for a fixture. MAME will not: it audits its set
+/// against its own CRC-32s, and an original program has none of them.
+///
+/// The blob is `DOWNLOAD_ORDER` end to end, 8192 bytes each.
+pub fn capture_blob(roms: &Path, trace: &Trace, frames: u32) -> Result<Capture, String> {
+    let exe = build()?;
     let dir = sim_dir();
     let raw = dir.join("frames.raw");
 
