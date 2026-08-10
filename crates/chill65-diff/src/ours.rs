@@ -132,6 +132,22 @@ impl OurRuntime {
         })
     }
 
+    /// As [`OurRuntime::snapshot`], with a compiled dispatch in place — so a
+    /// divergence between dispatched and interpreted runs can be localised the
+    /// same way any other divergence is.
+    pub fn snapshot_with(
+        &mut self,
+        trace: &Trace,
+        frame: u32,
+        compiled: &mut impl Compiled,
+    ) -> Result<Snapshot, String> {
+        let (machine, _) = self.drive_with(trace, frame + 1, true, compiled, |_| {})?;
+        Ok(Snapshot {
+            rgb: rgb_from_indices(&machine.framebuffer(), &machine.video.cram),
+            writers: machine.pixel_writers().expect("the log was enabled"),
+        })
+    }
+
     /// Run as far as `frame` inclusive and capture it, with attribution.
     ///
     /// The write log runs for the *whole* run, not just the last frame, which

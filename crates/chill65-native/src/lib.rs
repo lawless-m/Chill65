@@ -44,6 +44,8 @@ use chill65_runtime::{Cpu, Machine};
 pub struct Registry {
     routines: &'static [(u16, fn(&mut Cpu, &mut Machine, u64) -> u64)],
     executed: u64,
+    /// Instructions executed per routine entry, for the coverage report.
+    per_routine: std::collections::HashMap<u16, u64>,
 }
 
 impl Registry {
@@ -51,6 +53,7 @@ impl Registry {
         Registry {
             routines,
             executed: 0,
+            per_routine: std::collections::HashMap::new(),
         }
     }
 
@@ -73,6 +76,11 @@ impl Registry {
     pub fn is_empty(&self) -> bool {
         self.routines.is_empty()
     }
+
+    /// Instructions executed by each compiled routine, keyed by entry address.
+    pub fn per_routine(&self) -> &std::collections::HashMap<u16, u64> {
+        &self.per_routine
+    }
 }
 
 impl Compiled for Registry {
@@ -83,6 +91,7 @@ impl Compiled for Registry {
         };
         let ran = f(cpu, machine, deadline);
         self.executed += ran;
+        *self.per_routine.entry(pc).or_default() += ran;
         // Reporting `true` after executing nothing would spin: the caller would
         // offer the same pc again forever. A routine that yields immediately
         // hands the instruction back to the interpreter.
