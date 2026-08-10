@@ -329,6 +329,9 @@ reproduces it faithfully — correct behaviour for a port.
 
 That difference was described as unexplained when this was written, and is not
 any more: it is the power-on RAM test writing `FF` through every byte of RAM,
-the bitmap included, and clearing it again — visible to our frame-boundary
-snapshot and not to a scanning implementation. `harness.md` §12 has it in full.
-It is an artefact of how pictures are extracted, not a fault in the model.
+the bitmap included, and clearing it again, leaving a two-pixel marker that
+moves faster than the frame rate. Both we and the oracles sample it, at
+different phases, so we catch it on different frames. `harness.md` §12 has it in
+full — together with the finding that the harness never established that our
+frame *N* and an oracle's frame *N* are the same frame. Not a fault in the
+model.

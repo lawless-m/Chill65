@@ -123,15 +123,21 @@ native build, which is a smaller and different claim. Both external oracles
 still report the two-pixel `MN.ST` difference at frame 162, and the WebAssembly
 build reproduces it faithfully — correct behaviour for a port.
 
-**Note added after this gate ran.** That divergence is no longer unexplained.
-It is the power-on RAM test at `EBDE`–`EBFA` writing `FF` to every byte of RAM
-— the bitmap included — and clearing it again; our framebuffer is a snapshot of
-RAM at the frame boundary, so it catches whichever byte is mid-test, while MAME
-and the core scan out and essentially never coincide with that byte's 13-cycle
-window. The lit byte walks through memory exactly as the test does. Not a fault
-in the machine: an artefact of snapshot-versus-scanout extraction, which will
-recur wherever the game writes a transient into bitmap RAM. `harness.md` §12
-sets it out in full, with the evidence and the wrong fix it rules out.
+**Note added after this gate ran.** That divergence is no longer unexplained,
+and it is not a fault in the machine. It is the power-on RAM test at
+`EBDE`–`EBFA` writing `FF` through every byte of RAM — the bitmap included —
+and clearing it again, which leaves a two-pixel marker walking through memory
+faster than the frame rate. Both we and the oracles sample it; we sample it at a
+different phase, so we catch it on different frames. Frame 162 is the first
+index where our sample caught it and MAME's did not.
+
+It also exposed something larger: **the harness does not establish that our
+frame *N* and an oracle's frame *N* are the same frame.** The 161 frames of
+agreement preceding it are 161 frames in which both sides are blank; MAME's
+picture gains content a frame or two after ours and can be caught mid-draw where
+our snapshot never is. A reported divergence frame is worth ±2 frames for
+anything changing. `harness.md` §12 has the measurements, and the correction to
+a first explanation of this that was wrong.
 
 **That structure recovery was done.** It was measured, not written. See below.
 

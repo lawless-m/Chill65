@@ -338,15 +338,21 @@ With it gone, the comparison says something:
 ours vs mame: diverged at frame 162: MN.ST [CRF.MAC] (2 pixels)
 ```
 
-Both implementations now agree for **161 consecutive frames**, and the first real
+Both implementations now agree for **161 consecutive frames**, and the first
 difference is **two pixels** at frame 162 — the exact frame `boot.rs` measures as
 our first draw — attributed to `MN.ST`.
 
 The verilated MiSTer core, entirely independently, reports **the same frame, the
 same routine and the same two pixels** (§11.7). Two oracles built by different
-people from different sources converging on one answer is strong evidence that
-this is a real difference in our model rather than an artefact of either
-comparison.
+people from different sources converging on one answer looked at the time like
+strong evidence of a real difference in our model.
+
+> **Superseded by §12.** Both claims in this subsection are weaker than they
+> read. The 161 frames of agreement are 161 frames in which *both sides are
+> blank*, which agree at any alignment and carry no information. And the two
+> pixels are the power-on RAM test's cursor, sampled at different phases by each
+> implementation — the oracles catch it too, on other frames. §12 has the
+> measurements.
 
 Unresolved and now worth chasing: what those two pixels are. `MN.ST` is a
 drawing routine; the difference appears at the very first frame anything is
@@ -563,17 +569,85 @@ frame 172  (224, 50)      frame 184  (244,108)
 Always exactly two pixels, always one byte, advancing steadily until the test
 finishes around frame 208. Twenty of the 140 frames from 120 to 260 show it.
 
-### Why the oracles do not
+### Why the oracles disagree about *which* frames show it
 
-**We snapshot; they scan out.** `Video::framebuffer` reconstructs the whole
-picture from RAM as it stands at the frame boundary, so it catches whichever
-byte happens to be mid-test at that instant. MAME and the MiSTer core produce a
-picture the way the hardware does — the beam reads each byte once per frame, in
-well under a CPU cycle — so it essentially never coincides with that byte's
-13-cycle window.
+The first version of this section claimed the oracles essentially never catch
+the cursor, because a beam reads each byte in well under a cycle while the byte
+is `FF` for only thirteen. **That is wrong, and measuring it says so.** MAME
+catches the cursor about as often as we do — it simply catches it on *different
+frames*:
 
-Neither side is wrong about the machine. They are answering slightly different
-questions: *what is in memory now* against *what did the beam see*.
+```text
+frame   ours-lit  mame-lit          frame   ours-lit  mame-lit
+  162          2         0            182          2         2
+  164          2         0            183          0         2
+  166          0         2            184          2         0
+  168          2         2            185          0         2
+  170          2         0            187          0         2
+  176          2         2            188          2         2
+  178          0         2            195          0         2
+```
+
+Both are sampling one marker that moves through memory faster than the frame
+rate. Which frames catch it depends on the phase of each implementation's
+sampling instant against the test's ~34-cycle loop, and the two phases are not
+the same. Frame 162 is not where the machines diverge; it is simply **the first
+index at which our sample caught the cursor and theirs did not**.
+
+That is aliasing, and it is not fixable by making the model more correct. Every
+difference from frame 162 to about frame 208 has this character.
+
+### The frame numbers are not aligned
+
+The finding above is a symptom of something the harness does not establish:
+**that our frame *N* and an oracle's frame *N* are the same frame.** The
+comparison lines them up by index and reports the first index that differs.
+Three measurements say that assumption is unsafe.
+
+**The 161 frames of prior agreement are vacuous.** §10.4 says the two "agree for
+161 consecutive frames" before frame 162. They do — and both are *blank* for
+every one of them. Measured directly: frames 0–161 have zero lit pixels on both
+sides. Two blank screens agree at any offset, so those 161 frames carry no
+alignment information at all.
+
+**The oracle draws later, and draws partially.** Where the picture gains
+content, ours changes a frame or two before MAME's, and MAME shows a frame
+caught *mid-draw* that we never do:
+
+```text
+frame   ours-lit  mame-lit
+  312         88         0
+  313         88        31      <- MAME, mid-draw
+  314         88        88
+  335        176        88
+  336        176       176
+```
+
+Our snapshot is all-or-nothing: the frame boundary falls between the writes, so
+a picture is either drawn or not. MAME's 31-of-88 at frame 313 is the beam
+passing through a picture while the game is still drawing it, which is what real
+hardware does and what our extraction cannot represent.
+
+**A shift search does not find a clean offset.** Counting exact frame matches
+over frames 200–420 at shifts of −4 to +4 gives 154, 154, 157, 158, 161, 163,
+163, 159, 157. The best shifts are +1 and +2 rather than 0 — but by two frames
+out of 220, which is noise. Much of that range is static, so most frames match
+at any shift; the test cannot discriminate.
+
+The existing one-frame coin offset (§10.3: MAME's `coin-start` differs from idle
+at frame 402, ours at 403) is the same phenomenon seen from another angle.
+
+**What this means for reading a divergence report.** A reported frame number is
+the first index where two streams differ, which conflates a genuine difference,
+an offset between the two frame numberings, and one side catching a picture
+mid-draw. It is reliable for *static* content and worth no more than ±2 frames
+for anything changing. Nothing in the harness is calibrated against a shared
+timebase, and until something is, "diverged at frame N" should be read as
+"differences begin around frame N".
+
+This does not weaken the fault-injection gate, which localises a *routine* from
+a persistent difference in a static picture (§8). It does weaken any inference
+from a small divergence in a frame where something is being drawn.
 
 ### What was nearly changed, and should not be
 

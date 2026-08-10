@@ -81,8 +81,10 @@ Its first finding is that our colour RAM powers on white where both oracles powe
 on black — since corrected, after which both independently report the same
 two-pixel difference at frame 162 in `MN.ST`. That one is now explained too: it
 is the power-on RAM test writing `FF` through every byte of memory, the bitmap
-included, and clearing it again — which a frame-boundary snapshot catches and a
-scanning implementation does not. See `gate3.md` and `harness.md` §12.
+included, and clearing it again, leaving a marker that moves faster than the
+frame rate — which each implementation samples at a different phase. Chasing it
+found something larger, that the harness never established its frame numbers
+line up with an oracle's. See `gate3.md` and `harness.md` §12.
 
 **Phase 4 — the emitter.** `chill65-asm` lowers the game's routines to Rust,
 and `chill65-native` compiles them at build time and dispatches them beside the
