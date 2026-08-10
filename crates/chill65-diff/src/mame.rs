@@ -140,6 +140,12 @@ impl Mame {
             .args(["-autoboot_delay", "0"])
             .args(["-cfg_directory".as_ref(), cfg.as_os_str()])
             .args(["-nvram_directory".as_ref(), nvram.as_os_str()])
+            // `-video none` picks MAME's renderer, not SDL's video backend, so
+            // SDL still initialises kmsdrm: it takes DRM master from the running
+            // X server, sets a CRTC and restores it on exit. That is two
+            // modesets per run, which blanks the desktop every time the oracle
+            // is consulted. The dummy backend produces byte-identical frames.
+            .env("SDL_VIDEODRIVER", "dummy")
             .env("CHILL65_MAME_OUT", &raw)
             .env("CHILL65_MAME_FRAMES", frames.to_string())
             .env("CHILL65_MAME_INPUT", &input)
