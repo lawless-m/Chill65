@@ -35,6 +35,7 @@ pub mod exec;
 pub mod frame;
 pub mod input;
 pub mod machine;
+pub mod motion;
 pub mod pokey;
 pub mod video;
 
