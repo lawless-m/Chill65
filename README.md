@@ -13,7 +13,7 @@ own colour RAM. No game code or ROMs are distributed here; see below.*
 
 ## Status
 
-**Phases 0, 1, 2 and 3 complete and gated.**
+**Phases 0 through 4 complete and gated.**
 
 **Phase 1 — the assembler.** `chill65-asm` reassembles the original Atari source
 to output byte-identical with the original toolchain's own: 24,576 bytes of
@@ -78,7 +78,25 @@ own CRC-32, confirmed by `mame -verifyroms`, with nothing downloaded — and the
 MiSTer FPGA core is verilated unmodified as a second reference.
 
 Its first finding is that our colour RAM powers on white where both oracles power
-on black; see `gate3.md`.
+on black — since corrected, after which both independently report the same
+two-pixel difference at frame 162 in `MN.ST`. See `gate3.md`.
+
+**Phase 4 — the emitter.** `chill65-asm` lowers the game's routines to Rust,
+and `chill65-native` compiles them at build time and dispatches them beside the
+interpreter, sharing one machine state. **66.0% of executed instructions run as
+compiled Rust**, over the five committed traces, producing identical pictures
+and cycle counts either way.
+
+```
+CHILL65_CORPUS=/path/to/crystal-castles \
+  cargo test -p chill65-native -- --ignored --nocapture
+```
+
+Two lowerings: HLL65F's structured control flow carried through as native Rust
+`if` and `loop`, and everything else — a third of the game's branches, and most
+of its hottest code — recovered as a block-dispatch state machine. Emitted game
+Rust is generated into `OUT_DIR` and never committed; what is committed is a
+list of routine names.
 
 Windowing and audio are deliberately out of scope; the core stays headless and
 dependency-free.
@@ -99,6 +117,8 @@ See `atari-recompiler-plan.md` for the full plan, and:
 | `gate2.md` | The Phase 2 gate: Phase 1 unregressed, the game's own self-test passing, attract mode deterministic |
 | `harness.md` | **The Phase 3 deliverable.** The harness: trace format, oracle seam, routine attribution, the ROM-set reconstruction, and both external oracles |
 | `gate3.md` | The Phase 3 gate: fault injection localised to its frame and routine, and what the harness found |
+| `codegen.md` | **The Phase 4 deliverable.** The IR, the contract generated code targets, the four lowering buckets measured, and what resisted |
+| `gate4.md` | The Phase 4 gate: a majority of executed instructions compiled, indistinguishable from interpreting them |
 | `LOOP.md` | Working scope and stop conditions |
 
 ## You must supply your own game source
@@ -126,6 +146,7 @@ git clone https://github.com/MiSTer-devel/Arcade-CrystalCastles_MiSTer
 crates/chill65-asm/       assembler front end for the Atari MACRO-11 dialect
 crates/chill65-runtime/   6502 interpreter and Crystal Castles machine model
 crates/chill65-diff/      differential harness: traces, oracles, divergence localisation
+crates/chill65-native/    compiled routines, generated at build time and dispatched
 traces/                   recorded input traces (our own work, not game-derived)
 tools/                    Python analysis scripts (LDA decoder, source scanners)
 ```
