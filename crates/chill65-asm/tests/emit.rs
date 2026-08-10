@@ -124,7 +124,7 @@ fn a_structured_loop_becomes_a_rust_loop() {
 }
 
 #[test]
-fn a_hand_written_branch_is_refused_by_name() {
+fn a_hand_written_branch_becomes_a_state_machine() {
     let e = lower(
         "	.=0A000\n\
          MAIN::	LDX I,05\n\
@@ -133,17 +133,46 @@ fn a_hand_written_branch_is_refused_by_name() {
          	RTS\n",
         &["MAIN"],
     );
-    assert!(e.functions.is_empty(), "should not have lowered anything");
-    assert_eq!(e.refused.len(), 1);
-    let r = &e.refused[0];
-    assert_eq!(r.routine, "MAIN");
-    assert!(
-        r.reason.contains("hand-written branch") && r.reason.contains("relooper"),
-        "unhelpful reason: {}",
-        r.reason
+    assert!(e.refused.is_empty(), "refused: {:?}", e.refused);
+    assert_eq!(e.functions.len(), 1);
+    assert_eq!(
+        e.functions[0].bucket,
+        chill65_asm::emit::Bucket::StateMachine,
+        "a bare branch is bucket 2, not bucket 1"
     );
-    // Nothing half-emitted was left behind.
-    assert!(!e.source.contains("r_MAIN"), "{}", e.source);
+
+    // Blocks are keyed by address, and the backward branch moves between them
+    // rather than jumping.
+    assert!(e.source.contains("let mut block: u16 = 0xA000;"), "{}", e.source);
+    assert!(e.source.contains("match block {"), "{}", e.source);
+    assert!(e.source.contains("block = 0xA002;"), "{}", e.source);
+    // The branch's own condition, uninverted: BNE branches when Z is clear.
+    assert!(e.source.contains("if !cpu.zero {"), "{}", e.source);
+    // And anywhere with no block of its own yields to the interpreter.
+    assert!(
+        e.source.contains("_ => { cpu.pc = block; return done; }"),
+        "{}",
+        e.source
+    );
+}
+
+#[test]
+fn a_branch_out_of_the_routine_yields() {
+    let e = lower(
+        "	.=0A000\n\
+         MAIN::	LDX I,05\n\
+         	BNE AWAY\n\
+         	RTS\n\
+         AWAY::	RTS\n",
+        &["MAIN"],
+    );
+    assert!(e.refused.is_empty(), "refused: {:?}", e.refused);
+    // AWAY is its own routine, so the branch leaves: set pc and hand back.
+    assert!(
+        e.source.contains("if !cpu.zero { cpu.pc = 0xA005; return done; }"),
+        "{}",
+        e.source
+    );
 }
 
 #[test]
@@ -160,7 +189,7 @@ fn an_unknown_routine_is_refused_rather_than_ignored() {
 }
 
 #[test]
-fn refusing_one_routine_does_not_stop_the_others() {
+fn structured_and_state_machine_routines_coexist() {
     let e = lower(
         "	.=0A000\n\
          GOOD::	LDA I,01\n\
@@ -171,12 +200,15 @@ fn refusing_one_routine_does_not_stop_the_others() {
          	RTS\n",
         &["GOOD", "BAD"],
     );
-    assert_eq!(e.functions.len(), 1, "GOOD should still lower");
-    assert_eq!(e.functions[0].name, "GOOD");
-    assert_eq!(e.refused.len(), 1);
-    assert_eq!(e.refused[0].routine, "BAD");
+    // Both lower now, by different routes: GOOD is straight-line, BAD has a
+    // bare branch and so becomes a state machine.
+    assert!(e.refused.is_empty(), "refused: {:?}", e.refused);
+    assert_eq!(e.functions.len(), 2);
+    let by = |n: &str| e.functions.iter().find(|f| f.name == n).expect(n);
+    assert_eq!(by("GOOD").bucket, chill65_asm::emit::Bucket::Structured);
+    assert_eq!(by("BAD").bucket, chill65_asm::emit::Bucket::StateMachine);
     assert!(e.source.contains("r_GOOD"));
-    assert!(!e.source.contains("r_BAD"));
+    assert!(e.source.contains("r_BAD"));
 }
 
 #[test]

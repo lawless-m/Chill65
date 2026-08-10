@@ -14,6 +14,7 @@
 ; every iteration because JMP returns control to its own entry address.
 MAIN::	CLI
 	JSR WORK
+	JSR BARE
 	JMP MAIN
 
 ; Straight-line work, a conditional, and a countdown loop.
@@ -28,6 +29,24 @@ SKIP:	ENDIF
 	BEGIN
 TOP:	DEX
 	EQEND TOP
+	RTS
+
+; Hand-written control flow, with no construct macros at all -- the shape the
+; state machine has to recover: a backward loop with two exits, a forward
+; if/else chain, and a branch target shared by two paths.
+BARE::	LDX I,06
+LOOP:	DEX
+	BEQ OUT
+	CPX I,03
+	BEQ OUT
+	JMP LOOP
+OUT:	LDA I,01
+	CMP I,01
+	BNE ELSE
+	LDY I,07
+	JMP JOIN
+ELSE:	LDY I,09
+JOIN:	STY 0301
 	RTS
 
 ; The interrupt handler: acknowledge, pet the watchdog, return. Acknowledging

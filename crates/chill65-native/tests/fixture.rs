@@ -41,9 +41,17 @@ fn the_fixture_lowered_something() {
             .map(|(n, a, i, b)| format!("{n} @{a:04X} {i} instrs {b}"))
             .collect::<Vec<_>>()
     );
-    // The fixture's own routines, all of them structured.
+    // Both lowerings are exercised: WORK carries HLL65F structure through,
+    // while the hand-written loop becomes a block-dispatch state machine.
     assert!(fixture::METADATA.iter().any(|(n, ..)| *n == "WORK"));
-    assert!(fixture::METADATA.iter().all(|(.., b)| *b == "Structured"));
+    assert!(
+        fixture::METADATA.iter().any(|(.., b)| *b == "Structured"),
+        "no routine used the structured lowering"
+    );
+    assert!(
+        fixture::METADATA.iter().any(|(.., b)| *b == "StateMachine"),
+        "no routine used the state machine — the bare-branch path is untested"
+    );
 }
 
 #[test]

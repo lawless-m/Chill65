@@ -43,6 +43,14 @@ use crate::lexer::Mode;
 pub enum Bucket {
     /// HLL65F structure carried through as native Rust control flow.
     Structured,
+    /// Bare branches, lowered as a block-dispatch state machine.
+    ///
+    /// Plan §4 ranks this below structure recovery, and for the WASM target it
+    /// is: a `loop`/`match` is what LLVM cannot optimise across. For the native
+    /// target it is correct and complete, which is what the creep line needs
+    /// first. `codegen-readiness.md` measured 266 hand-written branches, 30.4%
+    /// of the game's control flow, and the hottest routines are among them.
+    StateMachine,
 }
 
 /// One generated function.
@@ -209,6 +217,23 @@ fn semantics(i: &Instruction) -> Option<String> {
     Some(call)
 }
 
+/// The Rust expression testing a branch instruction's own condition.
+///
+/// Uninverted, unlike a construct's: `BNE` branches when Z is clear.
+fn branch_condition(mnemonic: &str) -> Option<&'static str> {
+    Some(match mnemonic {
+        "BEQ" => "cpu.zero",
+        "BNE" => "!cpu.zero",
+        "BCS" => "cpu.carry",
+        "BCC" => "!cpu.carry",
+        "BMI" => "cpu.negative",
+        "BPL" => "!cpu.negative",
+        "BVS" => "cpu.overflow",
+        "BVC" => "!cpu.overflow",
+        _ => return None,
+    })
+}
+
 /// The Rust expression testing an HLL65F condition on the CPU flags.
 fn condition(cond: &str) -> Option<&'static str> {
     Some(match cond {
@@ -331,23 +356,21 @@ impl Emitter<'_> {
             return Err(format!("{depth} construct(s) left open"));
         }
 
-        // Bare branches are the relooper's business (plan §4 bucket 2).
-        if let Some(i) = events.iter().find_map(|e| match e {
-            Event::Instruction(i) if i.is_branch() && i.chain.is_empty() => Some(i),
-            _ => None,
-        }) {
-            return Err(format!(
-                "hand-written branch at {:04X} ({}) — needs the relooper",
-                i.addr, i.mnemonic
-            ));
-        }
+        // A routine with any hand-written branch goes through the CFG
+        // lowering, markers and all: mixing native structure with a state
+        // machine in one function would need the two to agree about where
+        // control is, and they have no way to.
+        let bare = events.iter().any(|e| match e {
+            Event::Instruction(i) => i.is_branch() && i.chain.is_empty(),
+            _ => false,
+        });
 
         // Every instruction must have a lowering or a control-flow rule.
         for e in &events {
             if let Event::Instruction(i) = e {
                 let known = semantics(i).is_some()
                     || matches!(i.mnemonic.as_str(), "RTS" | "RTI" | "JSR" | "JMP" | "BRK")
-                    || i.is_branch();
+                    || (i.is_branch() && branch_condition(&i.mnemonic).is_some());
                 if !known {
                     return Err(format!(
                         "no lowering for {} {:?} at {:04X}",
@@ -359,7 +382,13 @@ impl Emitter<'_> {
 
         let mut body = String::new();
         let mut lowered = 0usize;
-        self.block(&events, &mut 0, &mut body, 2, &mut lowered)?;
+        let bucket = if bare {
+            self.state_machine(&events, entry, &mut body, &mut lowered)?;
+            Bucket::StateMachine
+        } else {
+            self.block(&events, &mut 0, &mut body, 2, &mut lowered)?;
+            Bucket::Structured
+        };
 
         let f = ident(name);
         writeln!(
@@ -374,8 +403,154 @@ impl Emitter<'_> {
             name: name.to_string(),
             entry,
             instructions: lowered,
-            bucket: Bucket::Structured,
+            bucket,
         })
+    }
+
+    /// Lower a routine as a block-dispatch state machine.
+    ///
+    /// The control-flow graph is recovered from the instructions themselves:
+    /// leaders are the entry, every branch target inside the routine, and every
+    /// instruction following a transfer. Each block becomes one `match` arm
+    /// keyed by its address, and control moves by assigning the next block.
+    ///
+    /// Using the **address** as the state, rather than an index, is what makes
+    /// this safe at the edges: a branch out of the routine, or into the middle
+    /// of somewhere with no block of its own, falls to the `_` arm, which sets
+    /// `pc` and yields. The interpreter picks up from there. There is no way
+    /// for control to end up somewhere this function has an opinion about but
+    /// no code for.
+    fn state_machine(
+        &mut self,
+        events: &[&Event],
+        entry: u16,
+        out: &mut String,
+        lowered: &mut usize,
+    ) -> Result<(), String> {
+        let code: Vec<&Instruction> = events
+            .iter()
+            .filter_map(|e| match *e {
+                Event::Instruction(i) => Some(i),
+                _ => None,
+            })
+            .collect();
+        let last = code
+            .last()
+            .ok_or("state machine over a routine with no instructions")?;
+        let end = last.addr.wrapping_add(last.size);
+        let inside = |a: u16| a >= entry && a < end;
+
+        // Leaders: the entry, every in-routine branch target, and everything
+        // immediately after a transfer.
+        let mut leaders: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
+        leaders.insert(entry);
+        for i in &code {
+            let transfers = i.is_branch()
+                || matches!(i.mnemonic.as_str(), "JMP" | "JSR" | "RTS" | "RTI" | "BRK");
+            if transfers {
+                let next = i.addr.wrapping_add(i.size);
+                if inside(next) {
+                    leaders.insert(next);
+                }
+                if let Some(t) = i.value {
+                    if (i.is_branch() || i.mnemonic == "JMP") && inside(t) {
+                        leaders.insert(t);
+                    }
+                }
+            }
+        }
+
+        writeln!(out, "    let mut block: u16 = 0x{entry:04X};").unwrap();
+        writeln!(out, "    loop {{").unwrap();
+        writeln!(out, "        match block {{").unwrap();
+
+        for (n, leader) in leaders.iter().enumerate() {
+            let stop = leaders
+                .iter()
+                .find(|l| *l > leader)
+                .copied()
+                .unwrap_or(end);
+            writeln!(out, "            0x{leader:04X} => {{  // block {n}").unwrap();
+
+            let mut fell_through = true;
+            for i in code.iter().filter(|i| i.addr >= *leader && i.addr < stop) {
+                *lowered += 1;
+                if i.is_branch() {
+                    let cond = branch_condition(&i.mnemonic)
+                        .ok_or_else(|| format!("no condition for {}", i.mnemonic))?;
+                    let next = i.addr.wrapping_add(i.size);
+                    let target = i.value.unwrap_or(next);
+                    let taken = 3 + u8::from((target & 0xFF00) != (next & 0xFF00));
+                    self.yield_check(out, i.addr, 4);
+                    writeln!(out, "                // {:04X} {} {}", i.addr, i.mnemonic, i.operand_text).unwrap();
+                    writeln!(out, "                machine.begin_instruction(0x{:04X});", i.addr).unwrap();
+                    writeln!(out, "                cpu.pc = 0x{next:04X};").unwrap();
+                    writeln!(out, "                machine.tick(if {cond} {{ {taken} }} else {{ 2 }});").unwrap();
+                    writeln!(out, "                done += 1;").unwrap();
+                    // A branch out of the routine yields; one inside moves to
+                    // its block.
+                    if inside(target) {
+                        writeln!(out, "                if {cond} {{ block = 0x{target:04X}; }} else {{ block = 0x{next:04X}; }}").unwrap();
+                        writeln!(out, "                continue;").unwrap();
+                    } else {
+                        writeln!(out, "                if {cond} {{ cpu.pc = 0x{target:04X}; return done; }}").unwrap();
+                        writeln!(out, "                block = 0x{next:04X};").unwrap();
+                        writeln!(out, "                continue;").unwrap();
+                    }
+                    fell_through = false;
+                    break;
+                }
+                match i.mnemonic.as_str() {
+                    "JMP" if i.mode != Mode::N && i.value.is_some_and(inside) => {
+                        let target = i.value.expect("checked");
+                        self.yield_check(out, i.addr, 4);
+                        writeln!(out, "                // {:04X} JMP {}", i.addr, i.operand_text).unwrap();
+                        writeln!(out, "                machine.begin_instruction(0x{:04X});", i.addr).unwrap();
+                        writeln!(out, "                machine.tick(3);").unwrap();
+                        writeln!(out, "                done += 1;").unwrap();
+                        writeln!(out, "                block = 0x{target:04X};").unwrap();
+                        writeln!(out, "                continue;").unwrap();
+                        fell_through = false;
+                        break;
+                    }
+                    "JMP" | "JSR" | "RTS" | "RTI" | "BRK" => {
+                        self.instruction(i, out, 4)?;
+                        fell_through = false;
+                        break;
+                    }
+                    _ => self.instruction(i, out, 4)?,
+                }
+            }
+
+            if fell_through {
+                if inside(stop) {
+                    writeln!(out, "                block = 0x{stop:04X};").unwrap();
+                    writeln!(out, "                continue;").unwrap();
+                } else {
+                    // Ran off the end of the routine: hand back to the
+                    // interpreter rather than guess.
+                    writeln!(out, "                cpu.pc = 0x{stop:04X};").unwrap();
+                    writeln!(out, "                return done;").unwrap();
+                }
+            }
+            writeln!(out, "            }}").unwrap();
+        }
+
+        writeln!(out, "            _ => {{ cpu.pc = block; return done; }}").unwrap();
+        writeln!(out, "        }}").unwrap();
+        writeln!(out, "    }}").unwrap();
+        Ok(())
+    }
+
+    /// The Compiled contract's yield check, before an instruction.
+    fn yield_check(&mut self, out: &mut String, addr: u16, indent: usize) {
+        let pad = " ".repeat(indent * 4);
+        writeln!(
+            out,
+            "{pad}if machine.cycles >= deadline || (machine.irq_pending && \
+             !cpu.interrupt_disable) {{ cpu.pc = 0x{addr:04X}; return done; }}"
+        )
+        .unwrap();
     }
 
     /// Emit events from `at` until this block's closing marker, which is left
