@@ -1,0 +1,44 @@
+; A small original 6502 program, for proving compiled and interpreted
+; execution agree with no game corpus present.
+;
+; ORIGINAL WORK. Nothing here comes from the game source. It exercises what the
+; lowering must get right: straight-line work, a structured conditional, a
+; structured loop, a call and return, and an interrupt handler that the
+; interpreter finishes when a compiled routine yields to it.
+
+	.INCLUDE hll
+
+	.=0E000
+
+; The main loop. Global, so the emitter can be asked for it, and re-entered
+; every iteration because JMP returns control to its own entry address.
+MAIN::	CLI
+	JSR WORK
+	JMP MAIN
+
+; Straight-line work, a conditional, and a countdown loop.
+WORK::	LDA I,05
+	STA 0300
+	TAX
+	INX
+	IFEQ SKIP
+	INY
+SKIP:	ENDIF
+	LDX I,04
+	BEGIN
+TOP:	DEX
+	NEEND TOP
+	RTS
+
+; The interrupt handler: acknowledge, pet the watchdog, return. Acknowledging
+; matters -- a handler that skipped it would be re-entered the moment RTI
+; restored I.
+	.=0E100
+ISR::	STA 09D80
+	STA 09E00
+	RTI
+
+; Vectors.
+	.=0FFFC
+	.WORD MAIN
+	.WORD ISR

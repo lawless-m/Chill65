@@ -1,0 +1,9 @@
+# Routines to compile from the game, one name per line.
+#
+# Names only -- symbol names are our own reading of the source, not game code,
+# so this file is committable. The Rust generated for them is NOT: it is
+# emitted into OUT_DIR at build time and never committed (plan section 9).
+#
+# Empty until migration begins. Add a name, rebuild, then prove it with
+#   cargo run -p chill65-native --bin ccnative -- verify --trace traces/<t>.trace
+# on every committed trace before adding the next.

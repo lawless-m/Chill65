@@ -1,0 +1,29 @@
+; Minimal structured-control-flow constructs for the fixture program.
+;
+; ORIGINAL TEST SOURCE. Not HLL65F, and nothing here is copied from the game
+; corpus; these define macros of the same names so the emitter's structured
+; lowering can be exercised with no corpus present.
+;
+; The real package resolves its branch targets by back-patching -- LOC pushes
+; the location, FND rewinds and overwrites the placeholder operand once the
+; block's length is known. Reproducing that is not the point here, so these
+; take the target as an argument instead. What matters to the emitter is
+; unchanged: the construct is a macro of this name, and the branch it emits is
+; the next instruction.
+;
+; Note the inversion, which is HLL65F's too: IFEQ emits BNE, because the branch
+; jumps *over* the block when the condition does not hold.
+
+	.MACRO IFEQ SKIP
+	BNE SKIP
+	.ENDM
+
+	.MACRO ENDIF
+	.ENDM
+
+	.MACRO BEGIN
+	.ENDM
+
+	.MACRO NEEND TOP
+	BNE TOP
+	.ENDM

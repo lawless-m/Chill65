@@ -14,5 +14,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chill65-native"
+version = "0.1.0"
+dependencies = [
+ "chill65-asm",
+ "chill65-diff",
+ "chill65-runtime",
+]
+
+[[package]]
 name = "chill65-runtime"
 version = "0.1.0"
