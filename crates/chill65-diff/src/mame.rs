@@ -28,8 +28,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::images::workspace_root;
-use crate::reference::FRAME_BYTES;
+use crate::reference::{Frame, Reference, FRAME_BYTES};
 use crate::romset::{build_and_write, zip_path};
+use crate::trace::{FrameInput, Trace, ALL_SWITCHES};
 
 /// Environment variable naming the MAME executable.
 pub const MAME_ENV: &str = "CHILL65_MAME";
@@ -87,8 +88,19 @@ impl Mame {
             .to_path_buf())
     }
 
-    /// Boot the set and capture `frames` frames as canonical RGB24.
+    /// Boot the set with no input at all and capture `frames` frames.
     pub fn capture(&self, corpus: &Path, frames: u32) -> Result<Vec<Vec<u8>>, String> {
+        self.run_trace(corpus, &Trace::idle(frames as usize), frames)
+    }
+
+    /// Boot the set, drive it from `trace`, and capture `frames` frames as
+    /// canonical RGB24.
+    pub fn run_trace(
+        &self,
+        corpus: &Path,
+        trace: &Trace,
+        frames: u32,
+    ) -> Result<Vec<Vec<u8>>, String> {
         let rompath = self.rompath(corpus)?;
 
         // Fresh scratch every run: cfg and nvram persisting between runs is the
@@ -105,6 +117,10 @@ impl Mame {
         std::fs::write(&script, CAPTURE_LUA).map_err(|e| format!("{}: {e}", script.display()))?;
         let raw = self.scratch.join("frames.raw");
 
+        let input = self.scratch.join("input.txt");
+        std::fs::write(&input, input_file(trace, frames))
+            .map_err(|e| format!("{}: {e}", input.display()))?;
+
         // A generous ceiling: the script exits as soon as it has its frames, so
         // this only bounds a run that never gets there.
         let seconds = (frames / 60 + 10).to_string();
@@ -120,6 +136,7 @@ impl Mame {
             .args(["-nvram_directory".as_ref(), nvram.as_os_str()])
             .env("CHILL65_MAME_OUT", &raw)
             .env("CHILL65_MAME_FRAMES", frames.to_string())
+            .env("CHILL65_MAME_INPUT", &input)
             .output()
             .map_err(|e| format!("running {}: {e}", self.exe.display()))?;
 
@@ -158,6 +175,70 @@ impl Mame {
             ));
         }
         Ok(())
+    }
+}
+
+/// Serialise a trace as the per-frame input file the capture script reads:
+/// one line of `<IN0 mask> <trackball X> <trackball Y>` per frame.
+///
+/// # The two translations this performs
+///
+/// **Switches become an `IN0` mask.** MAME's `:IN0` fields sit on exactly the
+/// bits [`chill65_runtime::Switch::bit`] names — `0x40` Start1, `0x80` Start2, `0x10` Service
+/// Mode, `0x08` Tilt, `0x04` Service 1, `0x02` Coin 1, `0x01` Coin 2 — which is
+/// an independent confirmation of the switch model in `chill65-runtime`.
+///
+/// **Deltas become positions.** Our traces record per-frame movement, but the
+/// LETA reports an *absolute* count that the game differences itself
+/// (`CEN.MAC:317`, `TR.DEL`). So the deltas are accumulated here and the
+/// running total, taken modulo 256, is what MAME is told. One trace unit is one
+/// CPU-visible count: `input.rs` marks the host-delta-to-count scaling
+/// UNVERIFIED, and this is that choice made explicit rather than buried.
+pub fn input_file(trace: &Trace, frames: u32) -> String {
+    let mut out = String::with_capacity(frames as usize * 12);
+    let (mut x, mut y) = (0i32, 0i32);
+    for k in 0..frames as usize {
+        let input = trace.frames.get(k).copied().unwrap_or_else(FrameInput::idle);
+        x = x.wrapping_add(input.dx);
+        y = y.wrapping_add(input.dy);
+        let mask: u32 = ALL_SWITCHES
+            .into_iter()
+            .filter(|&s| input.switches.contains(s))
+            .map(|s| 1u32 << s.bit())
+            .sum();
+        out.push_str(&format!(
+            "{mask} {} {}\n",
+            x.rem_euclid(256),
+            y.rem_euclid(256)
+        ));
+    }
+    out
+}
+
+/// Our runtime's counterpart on the other side of the seam.
+pub struct MameReference {
+    mame: Mame,
+    corpus: PathBuf,
+}
+
+impl MameReference {
+    /// `None` when `CHILL65_MAME` is unset.
+    pub fn discover(corpus: impl Into<PathBuf>) -> Option<MameReference> {
+        Some(MameReference {
+            mame: Mame::discover()?,
+            corpus: corpus.into(),
+        })
+    }
+}
+
+impl Reference for MameReference {
+    fn run(&mut self, trace: &Trace, frames: u32, want_pixels: bool) -> Result<Vec<Frame>, String> {
+        Ok(self
+            .mame
+            .run_trace(&self.corpus, trace, frames)?
+            .into_iter()
+            .map(|rgb| Frame::new(rgb, want_pixels))
+            .collect())
     }
 }
 

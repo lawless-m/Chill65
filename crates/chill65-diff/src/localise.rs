@@ -161,6 +161,47 @@ pub fn localise(
     })
 }
 
+/// Compare our runtime against an external oracle and localise any divergence.
+///
+/// MAME and a verilated core have no write log to offer, so attribution comes
+/// from our side alone. That still names the routine that drew *our* version of
+/// the disputed pixels, which is the question worth asking — the oracle is
+/// evidence about what should have been drawn, not about who drew it.
+pub fn localise_external(
+    ours: &mut OurRuntime,
+    other: &mut dyn Reference,
+    trace: &Trace,
+    frames: u32,
+    symbols: &Symbols,
+) -> Result<Report, String> {
+    let comparison = compare(&ours.hashes(trace, frames)?, &other.hashes(trace, frames)?);
+
+    let Some(frame) = comparison.first_divergence else {
+        return Ok(Report {
+            comparison,
+            differing: 0,
+            unattributed: 0,
+            blame: Vec::new(),
+        });
+    };
+
+    let mine = ours.snapshot(trace, frame as u32)?;
+    let theirs = other
+        .run(trace, frame as u32 + 1, true)?
+        .pop()
+        .and_then(|f| f.rgb)
+        .ok_or("the oracle returned no pixels for the divergent frame")?;
+
+    let (differing, unattributed, blame) =
+        attribute(&mine.rgb, &theirs, &[&mine.writers], symbols);
+    Ok(Report {
+        comparison,
+        differing,
+        unattributed,
+        blame,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

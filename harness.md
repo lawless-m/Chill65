@@ -261,11 +261,93 @@ corrupted byte rather than merely that it passes.
 The convention is that an unset variable makes its test **skip cleanly** — print
 and return — never fail. See `images::corpus`.
 
-## 10. External oracles
+## 10. MAME as an oracle
 
-Not yet built. MAME and a verilated MiSTer core are the next two tasks; their
-sections will be appended here when they exist, including the discovered MAME
-port names, the RTL download map, the quadrature scaling decision, and the first
-observed divergence with its attribution.
+MAME 0.276, driven headless through its own Lua scripting API. Nothing modifies
+MAME or reaches past the documented interface. Gated on `CHILL65_MAME`, the path
+to the executable; unset means skip cleanly.
 
-Both are installed on the development machine: MAME 0.276 and Verilator 5.032.
+The screen is **256×232 at 61.035 Hz** — exactly the canonical frame, so no crop
+and no scale. `screen:pixels()` returns packed 32-bit values, `B G R A` on this
+host, alpha discarded. The capture script writes the geometry it actually saw to
+a sidecar and the Rust side checks it, so a future MAME that changes it errors
+rather than silently misaligning.
+
+### 10.1 The discovered port map
+
+Found at runtime by iterating `manager.machine.ioport.ports` rather than
+assumed:
+
+| Field | Port | Mask | Our `Switch` |
+|---|---|---|---|
+| `Right Jump/2P Start Upright` | `:IN0` | `0x80` | `Start2` |
+| `Left Jump/1P Start Upright` | `:IN0` | `0x40` | `Start1` |
+| `Service Mode` | `:IN0` | `0x10` | `SelfTest` |
+| `Tilt` | `:IN0` | `0x08` | `Slam` |
+| `Service 1` | `:IN0` | `0x04` | `CoinAux` |
+| `Coin 1` | `:IN0` | `0x02` | `CoinLeft` |
+| `Coin 2` | `:IN0` | `0x01` | `CoinRight` |
+| `Trackball Y` | `:LETA0` | `0xFF` | vertical axis |
+| `Trackball X` | `:LETA1` | `0xFF` | horizontal axis |
+
+Every mask lands on exactly the bit `Switch::bit` names, and LETA0 is vertical
+with LETA1 horizontal just as `input.rs` says from `CCastles.v:292` and the
+game's `HW.TBV`/`HW.TBH` equates. That is a third independent witness to the
+input model, arrived at from MAME's driver rather than from the RTL or the game
+source.
+
+Several fields share a mask — the upright and cocktail namings of one physical
+input — so the script keys by mask rather than by name and never has to choose
+between them arbitrarily.
+
+### 10.2 The two translations
+
+**Switches become an `IN0` mask**, bit for bit, per the table above.
+
+**Deltas become positions.** Our traces record per-frame movement, but the LETA
+reports an *absolute* count which the game differences itself (`CEN.MAC:317`,
+`TR.DEL`). The harness therefore accumulates the trace deltas and hands MAME the
+running total modulo 256. One trace unit is one CPU-visible count. `input.rs`
+marks host-delta-to-count scaling as UNVERIFIED; this is that choice made
+explicit rather than buried.
+
+### 10.3 Measured
+
+```text
+mame determinism: 500 frames identical across two runs
+mame input:       coin-start differs from idle at frame 402
+ours vs mame:     diverged at frame 0: 59392 pixels differ, none attributable
+```
+
+Determinism holds with fresh `cfg` and `nvram` directories per run. Input lands:
+`coin-start.trace` parts from idle at MAME frame 402, against 403 on our side —
+a one-frame offset, unexplained and worth returning to.
+
+### 10.4 The first divergence, and what it actually is
+
+Frame 0, every pixel, nothing attributable. Diagnosed rather than left as a
+number:
+
+- our frame 0 is **uniformly white** (255,255,255), one distinct colour;
+- MAME's frame 0 is **uniformly black**, one distinct colour.
+
+The cause is the reset state of colour RAM. Ours is all zeros, and `cram_rgb`
+inverts every component — `o = {~rbg[8:6], ~rbg[2:0], ~rbg[5:3]}`,
+`ColorMemory.v:33` — so a zeroed CRAM decodes to full white. MAME starts black.
+
+On real hardware colour RAM is RAM, and its power-on contents are undefined, so
+neither is obviously wrong; the game writes CRAM before it draws anything. But
+the consequence for the harness is concrete: **the very first frame diverges for
+a reason that has nothing to do with drawing, and masks everything after it.**
+The report is accurate and useless in equal measure.
+
+The refinement this asks for is a comparison window — start at a frame after the
+game has written CRAM, the way `idle-attract.trace` already waits out the
+self-test. That is recorded here rather than done, because it changes what the
+gate measures and deserves its own decision.
+
+## 11. The MiSTer RTL oracle
+
+Not yet built. Verilator 5.032 is installed. This section will carry the
+`dn_addr` download map, the quadrature scaling decision, the RGB expansion, and
+the first observed divergence with its attribution.
