@@ -19,11 +19,13 @@
 //!   switch levels, and the parser and serialiser for it.
 //! - [`reference`] — the oracle seam and the canonical frame every
 //!   implementation is compared in.
+//! - [`diverge`] — comparing two per-frame hash streams, and their file form.
 //! - [`ours`] — our own runtime behind that seam.
 //! - [`images`] — assembling the ROM images to run, from the corpus.
 //!
 //! No third-party dependencies, matching the rest of the workspace.
 
+pub mod diverge;
 pub mod images;
 pub mod ours;
 pub mod reference;
