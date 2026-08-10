@@ -369,9 +369,32 @@ pub fn cram_rgb(entry: u16) -> (u8, u8, u8) {
     let r = (!(entry >> 6) & 0x7) as u8;
     let g = (!entry & 0x7) as u8;
     let b = (!(entry >> 3) & 0x7) as u8;
-    let scale = |v: u8| ((v as u16 * 255) / 7) as u8;
-    (scale(r), scale(g), scale(b))
+    (DAC[r as usize], DAC[g as usize], DAC[b as usize])
 }
+
+/// Each three-bit channel as eight bits, through the board's resistor ladder.
+///
+/// **The RTL does not decide this.** `ColorMemory.v` emits three bits per
+/// channel; how they become a voltage is the resistor network on the way out,
+/// and how that becomes an 8-bit sample is a display-side choice. This was a
+/// linear `v * 255 / 7` until it was compared against MAME, which models the
+/// ladder.
+///
+/// Measured against MAME 0.276 over `gameplay.trace`: **0→0, 3→104, 4→151,
+/// 6→223, 7→255**. Those five fit a weighted sum with per-bit contributions
+/// **151, 72 and 32**, which sum to exactly 255 — and whose conductance ratios,
+/// 4.72 : 2.25 : 1, are a **1 kΩ / 2.2 kΩ / 4.7 kΩ** ladder, the ordinary Atari
+/// arrangement. So the fit is a resistor network rather than a curve.
+///
+/// **1, 2 and 5 are derived from those weights, not measured**: the game's
+/// palette never selects them in any committed trace, so MAME was never asked.
+/// If a trace ever exercises them, check before trusting them.
+///
+/// The difference is small — five counts at worst — and it was invisible to
+/// every lit-pixel measurement, which counts non-black. It was not invisible to
+/// pixel equality: it made roughly 20,000 of 59,392 pixels differ from MAME on
+/// a picture that was otherwise identical, which is what `harness.md` records.
+const DAC: [u8; 8] = [0, 32, 72, 104, 151, 183, 223, 255];
 
 /// FNV-1a, 64-bit. Hand-rolled: the runtime core takes no third-party crates,
 /// and a frame identity only needs to be stable and well-mixed, not secure.
