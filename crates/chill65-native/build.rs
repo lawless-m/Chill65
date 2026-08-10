@@ -118,7 +118,32 @@ fn generate_game(crate_dir: &Path, out: &Path) {
     for r in &emitted.refused {
         println!("cargo:warning=routine {} refused: {}", r.routine, r.reason);
     }
-    std::fs::write(out.join("game_compiled.rs"), &emitted.source).expect("write game code");
+
+    // Every routine's address range, whether compiled or not. The coverage
+    // report needs this to attribute an interpreted program counter to the
+    // routine that *contains* it: resolving to the nearest preceding symbol
+    // names local labels like `~L326$10` and `BITEST`, which are inside
+    // routines rather than being any.
+    let mut source = emitted.source;
+    let mut spans: std::collections::BTreeMap<&str, (u16, u16)> =
+        std::collections::BTreeMap::new();
+    for i in asm.ir.instructions() {
+        if let Some(r) = i.routine.as_deref() {
+            let e = spans.entry(r).or_insert((u16::MAX, 0));
+            e.0 = e.0.min(i.addr);
+            e.1 = e.1.max(i.addr.wrapping_add(i.size));
+        }
+    }
+    source.push_str(
+        "\n/// Every routine's address span, compiled or not: (name, start, end).\n\
+         pub const ALL_ROUTINES: &[(&str, u16, u16)] = &[\n",
+    );
+    for (name, (lo, hi)) in &spans {
+        source.push_str(&format!("    ({name:?}, 0x{lo:04X}, 0x{hi:04X}),\n"));
+    }
+    source.push_str("];\n");
+
+    std::fs::write(out.join("game_compiled.rs"), &source).expect("write game code");
 }
 
 /// A registry with nothing in it, so callers need no `cfg`.
@@ -126,7 +151,8 @@ fn empty_registry(why: &str) -> String {
     format!(
         "// Generated: {why}.\n\
          use chill65_runtime::{{Cpu, Machine}};\n\n\
-         pub const ROUTINES: &[(u16, fn(&mut Cpu, &mut Machine, u64) -> u64)] = &[];\n\
-         pub const METADATA: &[(&str, u16, usize, &str)] = &[];\n"
+         pub const ROUTINES: &[(u16, fn(&mut Cpu, &mut Machine, u64, u16) -> u64)] = &[];\n\
+         pub const METADATA: &[(&str, u16, usize, &str)] = &[];\n\
+         pub const ALL_ROUTINES: &[(&str, u16, u16)] = &[];\n"
     )
 }

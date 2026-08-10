@@ -178,30 +178,36 @@ fn coverage(args: &Args) -> Result<bool, String> {
     );
 
     // What to migrate next: the routines the interpreter spends most of its
-    // time in.
-    let mut by_routine: HashMap<String, (u64, bool)> = HashMap::new();
+    // time in. Attribution is by the routine whose span *contains* the program
+    // counter, not by the nearest preceding symbol — that would name local
+    // labels like `~L326$10`, which are inside routines rather than being any,
+    // and so cannot be migrated.
+    let containing = |pc: u16| -> String {
+        chill65_native::game::ALL_ROUTINES
+            .iter()
+            .find(|(_, lo, hi)| pc >= *lo && pc < *hi)
+            .map(|(n, ..)| (*n).to_string())
+            .unwrap_or_else(|| format!("{} (no routine)", symbols.routine_for(pc)))
+    };
+
+    // Compiled and interpreted are counted separately per routine, because a
+    // routine can be both: dispatch fires only at a routine's *entry*, so one
+    // reached by falling through, or by a branch from elsewhere, keeps
+    // interpreting however thoroughly it has been lowered. Collapsing the two
+    // into one "status" hides exactly the thing worth seeing.
+    let mut by_routine: HashMap<String, (u64, u64)> = HashMap::new();
     for (pc, n) in &profiler.interpreted {
-        let entry = by_routine
-            .entry(symbols.routine_for(*pc))
-            .or_insert((0, false));
-        entry.0 += n;
+        by_routine.entry(containing(*pc)).or_default().1 += n;
     }
     for (entry, n) in profiler.inner.per_routine() {
-        let e = by_routine
-            .entry(symbols.routine_for(*entry))
-            .or_insert((0, true));
-        e.0 += n;
-        e.1 = true;
+        by_routine.entry(containing(*entry)).or_default().0 += n;
     }
 
     let mut ranked: Vec<_> = by_routine.into_iter().collect();
-    ranked.sort_by_key(|(name, (n, _))| (std::cmp::Reverse(*n), name.clone()));
-    println!("\n  executed  status       routine");
-    for (name, (n, compiled)) in ranked.iter().take(15) {
-        println!(
-            "  {n:8}  {:11}  {name}",
-            if *compiled { "compiled" } else { "interpreted" }
-        );
+    ranked.sort_by_key(|(name, (c, i))| (std::cmp::Reverse(c + i), name.clone()));
+    println!("\n  executed  compiled  interpreted  routine");
+    for (name, (c, i)) in ranked.iter().take(15) {
+        println!("  {:8}  {c:8}  {i:11}  {name}", c + i);
     }
     Ok(true)
 }

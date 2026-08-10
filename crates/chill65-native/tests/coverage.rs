@@ -7,9 +7,13 @@
 //!
 //! Skips cleanly without the corpus.
 //!
-//! With nothing migrated this establishes the **baseline**: every trace
-//! identical dispatch-off versus dispatch-on, and 0% compiled. A meter that has
-//! never been seen reading zero is a meter nobody should trust reading fifty.
+//! Two assertions. Every trace must be **identical** dispatch-off versus
+//! dispatch-on — that is what makes a migration safe rather than merely fast.
+//! And the aggregate compiled share must **exceed 50%**, which is Phase 4's
+//! stated terminus made machine-checkable.
+//!
+//! This test was written when the manifest was empty and the share was 0%, so
+//! the meter has been seen reading zero as well as reading a majority.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -105,11 +109,18 @@ fn every_trace_verifies_and_the_metric_reports() {
     // empty one compiles nothing, a populated one must actually be running.
     if Registry::game().is_empty() {
         assert_eq!(compiled_total, 0, "an empty manifest compiled something");
-    } else {
-        assert!(
-            compiled_total > 0,
-            "{} routines are in the manifest but none of them executed",
-            Registry::game().len()
-        );
+        return;
     }
+    assert!(
+        compiled_total > 0,
+        "routines are in the manifest but none of them executed"
+    );
+
+    // Phase 4's terminus: a majority of the *running* code is compiled.
+    // Executed instructions, so a hundred cold routines cannot buy it.
+    assert!(
+        compiled_total * 2 > total,
+        "compiled share is {share:.1}%, which is not a majority — reopen \
+         migration rather than weakening this"
+    );
 }

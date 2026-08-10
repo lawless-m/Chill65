@@ -42,14 +42,14 @@ use chill65_runtime::{Cpu, Machine};
 /// [`Compiled`] safe: a routine that stops early is *finished by the
 /// interpreter*, never re-entered from the top.
 pub struct Registry {
-    routines: &'static [(u16, fn(&mut Cpu, &mut Machine, u64) -> u64)],
+    routines: &'static [(u16, fn(&mut Cpu, &mut Machine, u64, u16) -> u64)],
     executed: u64,
     /// Instructions executed per routine entry, for the coverage report.
     per_routine: std::collections::HashMap<u16, u64>,
 }
 
 impl Registry {
-    pub fn new(routines: &'static [(u16, fn(&mut Cpu, &mut Machine, u64) -> u64)]) -> Registry {
+    pub fn new(routines: &'static [(u16, fn(&mut Cpu, &mut Machine, u64, u16) -> u64)]) -> Registry {
         Registry {
             routines,
             executed: 0,
@@ -89,7 +89,7 @@ impl Compiled for Registry {
         let Some((_, f)) = self.routines.iter().find(|(entry, _)| *entry == pc) else {
             return false;
         };
-        let ran = f(cpu, machine, deadline);
+        let ran = f(cpu, machine, deadline, pc);
         self.executed += ran;
         *self.per_routine.entry(pc).or_default() += ran;
         // Reporting `true` after executing nothing would spin: the caller would

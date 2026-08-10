@@ -4,6 +4,27 @@ Phase 4's deliverable in progress: what the emitter does, what resisted it, and
 what the numbers are. Figures here are measured by commands that exist, named
 beside each.
 
+## 0. Where it ended
+
+**66.0% of executed instructions compiled**, over the five committed traces,
+with every trace producing an identical picture and cycle count whether
+dispatched or interpreted.
+
+| Trace | Instructions | Compiled |
+|---|---|---|
+| `coin-start.trace` | 5,559,710 | 76.4% |
+| `gameplay.trace` | 15,844,630 | 49.8% |
+| `idle-attract.trace` | 3,950,048 | 69.9% |
+| `selftest.trace` | 3,677,393 | 57.8% |
+| `wrap-stress.trace` | 11,491,747 | 84.4% |
+| **aggregate** | **40,523,528** | **66.0%** |
+
+```
+CHILL65_CORPUS=<corpus> cargo test -p chill65-native -- --ignored --nocapture
+```
+
+The rest of this document is how it got there, in the order it happened.
+
 ## 1. Migration wave 1
 
 Seven routines compiled, each added to `crates/chill65-native/routines.txt`
@@ -128,8 +149,55 @@ both and the report names the frame and the routines. Nothing new was invented
 for checking compiled code — the harness built to compare against MAME compares
 against ourselves just as well.
 
-## 6. Still to come
+## 6. The relooper, and the thing that actually mattered
 
-The relooper (bucket 2), migration wave 2, and the majority gate. Sections on
-the lowering contract, the buckets' final ratios, and what resisted lowering
-routine by routine will be completed when those land.
+Bare branches are lowered as a **block-dispatch state machine**: leaders are the
+entry, every in-routine branch target, and everything after a transfer; each
+block becomes a `match` arm. The state is the block's **address**, not an index,
+so a branch out of the routine — or into somewhere with no block of its own —
+falls to the wildcard arm, sets `pc` and yields. Control cannot reach a place
+the function has an opinion about but no code for.
+
+That took the aggregate from 1.5% to 30.7%. Then it stalled, and the reason was
+worth finding.
+
+### 6.1 Dispatch at entries only is a ceiling, not a detail
+
+With twenty routines compiled the aggregate sat at 34.5%, and the per-routine
+report explained why once it counted compiled and interpreted **separately**:
+
+```
+executed  compiled  interpreted  routine
+ 1384124        20      1384104  MN.ST
+  769695         4       769691  RAMOK
+  124522        22       124500  ROMTS1
+```
+
+`MN.ST` was dispatched, ran twenty instructions, hit a `JSR`, yielded — and the
+remaining 1.38 million interpreted. Dispatch fired only at a routine's *entry*,
+so once a routine yielded mid-way nothing re-entered it. Compiling a routine
+bought almost nothing.
+
+Until that column was split, the report showed `MN.ST` as simply "compiled",
+because it had been dispatched at least once. The status was true and useless.
+
+### 6.2 Resumable dispatch
+
+Generated functions now take a starting block, and every block address of a
+state-machine routine is registered. A routine can be resumed wherever the
+interpreter left it. Aggregate 34.5% → **66.0%**, with no new routines migrated
+— the same twenty, re-entered.
+
+## 7. What this does not do
+
+Reducible control flow is lowered as a state machine rather than recovered into
+`loop` and `if`. Plan §4 ranks structure recovery above the fallback and for the
+**WASM target it matters**: a `loop`/`match` dispatch is precisely what LLVM
+cannot optimise across, and §4 exists because WASM permits no arbitrary jumps.
+For the native target the state machine is correct and complete, which is what
+the creep line needed first. Recovering natural loops and if/else joins from
+reducible regions is the obvious next piece of work and is **not done**.
+
+Structured routines are single-entry, since Rust control flow has no computed
+entry point. A structured routine that yields mid-way still interprets its tail.
+That is part of why `gameplay.trace` is the lowest at 49.8%.

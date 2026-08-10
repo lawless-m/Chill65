@@ -59,6 +59,10 @@ pub struct Function {
     pub name: String,
     /// The routine's entry address, which the registry dispatches on.
     pub entry: u16,
+    /// Every address the dispatch may enter this function at. For a state
+    /// machine that is every block; for structured lowering, only the entry,
+    /// since Rust control flow has no computed entry point.
+    pub entries: Vec<u16>,
     /// Instructions lowered, for the coverage metric.
     pub instructions: usize,
     pub bucket: Bucket,
@@ -382,8 +386,9 @@ impl Emitter<'_> {
 
         let mut body = String::new();
         let mut lowered = 0usize;
+        let mut entry_points = Vec::new();
         let bucket = if bare {
-            self.state_machine(&events, entry, &mut body, &mut lowered)?;
+            entry_points = self.state_machine(&events, entry, &mut body, &mut lowered)?;
             Bucket::StateMachine
         } else {
             self.block(&events, &mut 0, &mut body, 2, &mut lowered)?;
@@ -394,8 +399,8 @@ impl Emitter<'_> {
         writeln!(
             self.out,
             "/// `{name}` at `{entry:04X}`, {lowered} instructions.\n\
-             pub fn {f}(cpu: &mut Cpu, machine: &mut Machine, deadline: u64) -> u64 {{\n    \
-             let mut done = 0u64;\n{body}    done\n}}\n"
+             pub fn {f}(cpu: &mut Cpu, machine: &mut Machine, deadline: u64, start: u16) -> u64 {{\n    \
+             let _ = start;\n    let mut done = 0u64;\n{body}    done\n}}\n"
         )
         .expect("writing to a String");
 
@@ -403,6 +408,11 @@ impl Emitter<'_> {
             name: name.to_string(),
             entry,
             instructions: lowered,
+            entries: if entry_points.is_empty() {
+                vec![entry]
+            } else {
+                entry_points
+            },
             bucket,
         })
     }
@@ -426,7 +436,7 @@ impl Emitter<'_> {
         entry: u16,
         out: &mut String,
         lowered: &mut usize,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<u16>, String> {
         let code: Vec<&Instruction> = events
             .iter()
             .filter_map(|e| match *e {
@@ -460,7 +470,11 @@ impl Emitter<'_> {
             }
         }
 
-        writeln!(out, "    let mut block: u16 = 0x{entry:04X};").unwrap();
+        // `start` lets the dispatch resume a routine at any block, not only at
+        // its entry. Without that a routine yields at its first JSR and the
+        // interpreter finishes it -- measured on `MN.ST`, 20 instructions
+        // compiled out of 1,384,124.
+        writeln!(out, "    let mut block: u16 = start;").unwrap();
         writeln!(out, "    loop {{").unwrap();
         writeln!(out, "        match block {{").unwrap();
 
@@ -539,7 +553,7 @@ impl Emitter<'_> {
         writeln!(out, "            _ => {{ cpu.pc = block; return done; }}").unwrap();
         writeln!(out, "        }}").unwrap();
         writeln!(out, "    }}").unwrap();
-        Ok(())
+        Ok(leaders.into_iter().collect())
     }
 
     /// The Compiled contract's yield check, before an instruction.
@@ -882,11 +896,13 @@ pub fn emit(ir: &Ir, want: &[&str]) -> Emitted {
     writeln!(
         e.out,
         "/// Entry address to generated function, for the `Compiled` dispatch.\n\
-         pub const ROUTINES: &[(u16, fn(&mut Cpu, &mut Machine, u64) -> u64)] = &["
+         pub const ROUTINES: &[(u16, fn(&mut Cpu, &mut Machine, u64, u16) -> u64)] = &["
     )
     .unwrap();
     for f in &functions {
-        writeln!(e.out, "    (0x{:04X}, {}),", f.entry, ident(&f.name)).unwrap();
+        for entry in &f.entries {
+            writeln!(e.out, "    (0x{entry:04X}, {}),", ident(&f.name)).unwrap();
+        }
     }
     writeln!(e.out, "];\n").unwrap();
 

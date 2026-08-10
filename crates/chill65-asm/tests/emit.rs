@@ -143,7 +143,10 @@ fn a_hand_written_branch_becomes_a_state_machine() {
 
     // Blocks are keyed by address, and the backward branch moves between them
     // rather than jumping.
-    assert!(e.source.contains("let mut block: u16 = 0xA000;"), "{}", e.source);
+    // The block is taken from `start`, so the dispatch can resume the routine
+    // at any block rather than only at its entry.
+    assert!(e.source.contains("let mut block: u16 = start;"), "{}", e.source);
+    assert!(e.functions[0].entries.len() > 1, "every block should be resumable");
     assert!(e.source.contains("match block {"), "{}", e.source);
     assert!(e.source.contains("block = 0xA002;"), "{}", e.source);
     // The branch's own condition, uninverted: BNE branches when Z is clear.
