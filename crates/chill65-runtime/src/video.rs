@@ -133,10 +133,26 @@ impl Default for Video {
 
 impl Video {
     pub fn new() -> Self {
+        // Colour RAM powers on black rather than white.
+        //
+        // Every entry is active-low (see `cram_rgb`), so a zeroed table decodes
+        // to full white — and entry `BITMAP_CRAM_BASE` is the one a bitmap
+        // pixel of zero selects, which is the whole screen before the game
+        // draws anything. Both external oracles disagreed with that: the MiSTer
+        // core's `cram.rom` sets exactly this entry to `1FF`, and MAME starts
+        // black too. Phase 3's differential harness found it, and both
+        // comparisons stalled on it — see `harness.md` §11.3 and `gate3.md`.
+        //
+        // On real hardware colour RAM is RAM and its power-on contents are
+        // undefined, so this is a deliberate choice to match two independent
+        // implementations rather than a correction of a proven error.
+        let mut cram = [0u16; 32];
+        cram[BITMAP_CRAM_BASE] = 0x1FF;
+
         Video {
             xcoord: 0,
             ycoord: 0,
-            cram: [0; 32],
+            cram,
             hscroll: 0,
             vscroll: VSCROLL_FLOOR,
         }

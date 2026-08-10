@@ -188,7 +188,7 @@ our own authored work and none of those things. Every file says so in its header
 | Trace | Frames | Differs from idle at |
 |---|---|---|
 | `idle-attract.trace` | 600 | — (baseline) |
-| `selftest.trace` | 600 | 354 |
+| `selftest.trace` | 600 | 366 |
 | `coin-start.trace` | 900 | 403 |
 | `gameplay.trace` | 2640 | 403 |
 | `wrap-stress.trace` | 2006 | 403 |
@@ -205,9 +205,10 @@ press before that does nothing at all.
 It reports absolute position and wraps; the game differences it itself
 (`CEN.MAC:317-330`).
 
-`selftest.trace` parting from idle at frame **354** is independent corroboration
-of `hardware.md` §10.2, which puts the end of the power-on self-test around
-frame 353.
+`selftest.trace` parts from idle at frame **366**, near `hardware.md` §10.2's
+placing of the end of the power-on self-test around frame 353. (It read 354
+before colour RAM was initialised to match the oracles — see §11.3 — since the
+harness hashes colours and the first frames are no longer uniform.)
 
 ## 8. What the harness is gated on
 
@@ -323,28 +324,33 @@ Determinism holds with fresh `cfg` and `nvram` directories per run. Input lands:
 `coin-start.trace` parts from idle at MAME frame 402, against 403 on our side —
 a one-frame offset, unexplained and worth returning to.
 
-### 10.4 The first divergence, and what it actually is
+### 10.4 The first divergence — resolved, and what was behind it
 
-Frame 0, every pixel, nothing attributable. Diagnosed rather than left as a
-number:
+This first read **frame 0, every pixel, nothing attributable**: our frame 0 was
+uniformly white, MAME's uniformly black. The cause was the reset state of colour
+RAM, diagnosed in §11.3 and since **fixed** — `Video::new` now sets entry 16 to
+`0x1FF`, so the machine powers on black as both oracles do.
 
-- our frame 0 is **uniformly white** (255,255,255), one distinct colour;
-- MAME's frame 0 is **uniformly black**, one distinct colour.
+That divergence had nothing to do with drawing and masked everything after it.
+With it gone, the comparison says something:
 
-The cause is the reset state of colour RAM. Ours is all zeros, and `cram_rgb`
-inverts every component — `o = {~rbg[8:6], ~rbg[2:0], ~rbg[5:3]}`,
-`ColorMemory.v:33` — so a zeroed CRAM decodes to full white. MAME starts black.
+```text
+ours vs mame: diverged at frame 162: MN.ST [CRF.MAC] (2 pixels)
+```
 
-On real hardware colour RAM is RAM, and its power-on contents are undefined, so
-neither is obviously wrong; the game writes CRAM before it draws anything. But
-the consequence for the harness is concrete: **the very first frame diverges for
-a reason that has nothing to do with drawing, and masks everything after it.**
-The report is accurate and useless in equal measure.
+Both implementations now agree for **161 consecutive frames**, and the first real
+difference is **two pixels** at frame 162 — the exact frame `boot.rs` measures as
+our first draw — attributed to `MN.ST`.
 
-The refinement this asks for is a comparison window — start at a frame after the
-game has written CRAM, the way `idle-attract.trace` already waits out the
-self-test. That is recorded here rather than done, because it changes what the
-gate measures and deserves its own decision.
+The verilated MiSTer core, entirely independently, reports **the same frame, the
+same routine and the same two pixels** (§11.7). Two oracles built by different
+people from different sources converging on one answer is strong evidence that
+this is a real difference in our model rather than an artefact of either
+comparison.
+
+Unresolved and now worth chasing: what those two pixels are. `MN.ST` is a
+drawing routine; the difference appears at the very first frame anything is
+drawn, which suggests an edge condition rather than a systematic error.
 
 ## 11. The verilated MiSTer core
 
@@ -415,18 +421,30 @@ Measured, all three implementations from cold:
 | MAME | black |
 | MiSTer core, `cram.rom` loaded | black |
 | MiSTer core, `cram.rom` missing | white (an artefact, not the core's behaviour) |
-| **`chill65-runtime`** | **white** |
+| **`chill65-runtime`**, as measured | **white** |
 
-`Video::new` sets `cram: [0; 32]`, and a zeroed entry 16 decodes to full white.
-So on this point **our reset state disagrees with both external oracles**, and
-that — not anything about drawing — is what §10.4's frame-0 divergence against
-MAME actually is.
+`Video::new` set `cram: [0; 32]`, and a zeroed entry 16 decodes to full white.
+So on this point **our reset state disagreed with both external oracles**, and
+that — not anything about drawing — was what §10.4's frame-0 divergence actually
+was.
 
-On real hardware colour RAM is RAM and its power-on contents are undefined, so
-this is not a proven modelling error. But two independent implementations chose
-black, the disagreement masks every later divergence, and matching them would
-cost one line. That is a decision to take deliberately, and it is recorded here
-rather than taken.
+**Decision taken: match the oracles.** `Video::new` now initialises entry
+`BITMAP_CRAM_BASE` to `0x1FF`, so the machine powers on black. On real hardware
+colour RAM is RAM with undefined power-on contents, so this is not the correction
+of a proven error — it is a deliberate choice to agree with two independent
+implementations, made because the disagreement was masking every later
+divergence. A comparison window was the alternative and was not taken: changing
+the reset state costs one line and leaves the harness measuring whole runs.
+
+`Machine::frame_hash` hashes palette *indices*, so nothing in Phase 2 moved:
+attract is still `087e02f4ca003874` at 12,288,528 cycles and the self-test
+verdict is unchanged. The harness hashes colours, so its streams did move —
+`selftest.trace` now parts from idle at frame 366 rather than 354 — and the
+fault-injection fixture is unaffected, still frame 419 and `LN.F1`, because both
+sides of an ours-versus-ours comparison shifted together.
+
+What the change bought is in §10.4 and §11.7: both external comparisons went
+from an unattributable wall at frame 0 to a two-pixel difference at frame 162.
 
 ### 11.4 Measured
 
@@ -474,19 +492,22 @@ UNVERIFIED.
 
 ```text
 mister determinism: 60 frames identical across two runs
-ours vs mister:     diverged at frame 0: 59392 pixels differ, none attributable
+ours vs mister:     diverged at frame 162: MN.ST [CRF.MAC] (2 pixels)
 ```
 
 The simulation is deterministic across genuine re-simulations, not merely
-replays. And the comparison lands on the same wall MAME's did: **frame 0**,
-every pixel, nothing attributable — our white against the core's black, the
-colour-RAM reset difference of §11.3 and nothing to do with drawing.
+replays.
 
-That is the useful result of this pass. Two independent oracles, built by
-different people from different sources, both power on black; we power on white;
-and in both comparisons that one difference at frame 0 hides everything that
-follows. The case for either matching their reset state or comparing from a
-later frame is now made twice over rather than once.
+The comparison first read `diverged at frame 0: 59392 pixels differ, none
+attributable` — the same wall MAME hit, and for the same reason: our white
+against the core's black. With colour RAM initialised to match (§11.3), it now
+agrees with us for 161 frames and then differs by **two pixels** in `MN.ST`.
+
+**MAME, independently, reports the identical frame, routine and pixel count**
+(§10.4). Two oracles with nothing in common but the hardware they model — one a
+C++ emulator, one an FPGA core verilated from Verilog — converging on the same
+two pixels is about as strong as this kind of evidence gets. Whatever those two
+pixels are, they are ours.
 
 Bounds on any comparison against this core, for whoever acts on it:
 

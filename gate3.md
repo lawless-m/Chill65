@@ -55,6 +55,7 @@ nothing. It is a measurement, not a hope.
 ROM set:      11 of 11 devices match MAME's CRC-32
 traces:       5 files play deterministically, none expire the watchdog
               selftest 354, coin-start 403, gameplay 403, wrap-stress 403
+              (selftest reads 366 after the colour RAM change below)
 clean vs clean:  identical over 600 frames
 clean vs faulty: diverged at frame 419: LN.F1 [CRF.MAC] (85 pixels),
                  SQ.LDR [CRF.MAC] (50 pixels), WV.BDR [CRF.MAC] (35 pixels)
@@ -63,6 +64,8 @@ mame:         boots the rebuilt set, 15,283 lit pixels by frame 399
 mister:       verilated unmodified, 252 emitted columns, deterministic
 ours vs mame:   diverged at frame 0: 59392 pixels differ, none attributable
 ours vs mister: diverged at frame 0: 59392 pixels differ, none attributable
+                (both became frame 162, MN.ST, 2 pixels once colour RAM was
+                 initialised to match -- see "What it found" below)
 ```
 
 ## The fault-injection fixture, and why it is a pair of flips
@@ -133,15 +136,35 @@ white. The MiSTer core's `cram.rom` sets exactly that entry to `1FF`, which
 inverts to black, and MAME starts black too.
 
 On real hardware colour RAM is RAM and its power-on contents are undefined, so
-this is not a proven modelling error. But it has a concrete consequence: **both
-external comparisons diverge at frame 0 for a reason unrelated to drawing, and
-that divergence masks everything after it.** Both reports are accurate and
+this is not a proven modelling error. But it had a concrete consequence: **both
+external comparisons diverged at frame 0 for a reason unrelated to drawing, and
+that divergence masked everything after it.** Both reports were accurate and
 useless in equal measure.
 
-Two remedies, either of which would make the external comparisons informative:
-initialise entry 16 to `1FF` to match both oracles, or compare from a frame
-after the game has written CRAM. Neither is taken here. This is a decision about
-what the harness measures and belongs to a human.
+**Resolved after this gate, at the start of Phase 4.** `Video::new` now
+initialises entry `BITMAP_CRAM_BASE` to `0x1FF`, so the machine powers on black
+like both oracles. The alternative — a comparison window starting after the game
+writes CRAM — was not taken; changing the reset state costs one line and leaves
+the harness measuring whole runs. Nothing in this gate's figures moved, because
+`frame_hash` hashes palette indices rather than colours.
+
+What it bought, and the reason it was worth doing:
+
+```text
+before   ours vs mame:   diverged at frame 0: 59392 pixels differ, none attributable
+         ours vs mister: diverged at frame 0: 59392 pixels differ, none attributable
+
+after    ours vs mame:   diverged at frame 162: MN.ST [CRF.MAC] (2 pixels)
+         ours vs mister: diverged at frame 162: MN.ST [CRF.MAC] (2 pixels)
+```
+
+Both oracles now agree with us for 161 consecutive frames and then report **the
+same frame, the same routine and the same two pixels** — at frame 162, which is
+exactly where `boot.rs` measures our first draw. A C++ emulator and an FPGA core
+verilated from Verilog, with nothing in common but the hardware they model,
+converging on one answer is strong evidence that those two pixels are a real
+difference in our model. Chasing them is Phase 4's inheritance. See `harness.md`
+§10.4, §11.3 and §11.7.
 
 Also unresolved, and named rather than glossed:
 
