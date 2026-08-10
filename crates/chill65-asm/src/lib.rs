@@ -18,6 +18,7 @@
 
 pub mod assemble;
 pub mod directives;
+pub mod emit;
 pub mod encode;
 pub mod expr;
 pub mod ir;
