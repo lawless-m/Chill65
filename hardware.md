@@ -731,9 +731,8 @@ term of `sel` contains some `~MV[i]` — `sel` collapses to 0, `A4` is driven hi
 by its last term `MV[2] & MV[1] & MV[0]`, and `A3:A0` pass `BIT[3:0]` through
 unchanged. The address is therefore `{1, pixel}`: **entries 16–31**.
 
-This is **derived, not measured**, and motion-object arbitration is not modelled
-at all. If a dumped picture ever comes out in the wrong colours, this is the
-first thing to doubt.
+This is **derived, not measured**. It is also now a special case of something
+implemented in full: see §13.
 
 ### 12.2 Decoding an entry (**corroborated**)
 
@@ -748,6 +747,29 @@ Getting any of these wrong yields a garish picture rather than a subtly wrong
 one, which is a mercy. The rendered attract screen shows grey castle walls, red
 turret tops, tan paths and white text, which is Crystal Castles.
 
+**How three bits become eight is not in the RTL** (**measured**). `ColorMemory.v`
+emits three bits per channel; the expansion is the resistor ladder on the way
+out, and this model used a linear `v * 255 / 7` until it was compared against
+MAME, which models the ladder. Measured correspondence:
+
+```text
+3-bit   0     3     4     6     7
+ours    0   109   145   218   255      (was: linear)
+MAME    0   104   151   223   255
+```
+
+Those five fit per-bit contributions of **151, 72 and 32**, summing to exactly
+255, whose conductance ratios 4.72 : 2.25 : 1 are a **1 kΩ / 2.2 kΩ / 4.7 kΩ**
+ladder — the ordinary Atari arrangement, so the fit is a resistor network rather
+than a curve. `video::DAC` carries the table. **1, 2 and 5 are derived from
+those weights, not measured**: the game's palette selects them in no committed
+trace, so MAME was never asked.
+
+The error was five counts at worst and invisible to every lit-pixel measurement,
+which counts non-black. It was **not** invisible to pixel equality: it made
+roughly 20,000 of 59,392 pixels differ from MAME on a picture that was otherwise
+identical, and it had done so since Phase 3.
+
 ### 12.3 Determinism (**verified**)
 
 600 frames of attract mode produce frame hash `087e02f4ca003874` with 33,238 lit
@@ -761,3 +783,103 @@ differential harness against MAME cannot be built without it.
 
 The test also runs 300 frames and asserts the hash **differs**, so the equality
 above cannot be satisfied by a machine that simply never changes.
+
+## 13. Motion objects (**verified against the core**)
+
+The bitmap draws the castle and the crystals. Everything that moves — Bentley
+Bear and everything chasing him — is a **motion object**, drawn by separate
+hardware and composited over the bitmap. Modelled in
+`chill65-runtime/src/motion.rs`, and **verified**: the model agrees with the
+verilated MiSTer core to **zero differing pixels** over the 252 columns the core
+emits, on a fixture that plants nine objects (`chill65-diff/tests/mob_fixture.rs`).
+
+### 13.1 The table
+
+`WorkingRam.v:16` addresses SRAM from the video side as
+`{3'b111, BUF1BUF2n, HC[8:2]}` — an 11-bit *word* address. `BUF1BUF2n` is OUT1
+bit 7, `MT.BSL` at `9F07` (§4), so the table is one of two 256-byte halves:
+
+| `MT.BSL` | SRAM | CPU |
+|---|---|---|
+| 0 | `0xE00–0xEFF` | `8E00–8EFF` |
+| 1 | `0xF00–0xFFF` | `8F00–8FFF` |
+
+`HC[8:2]` steps one word every four pixel clocks and `PositionControl.v` loads a
+horizontal counter every eight (`HC[2:0] == 101`), so an object is **two words,
+four bytes**, and exactly **40** are scanned per line — `HC` runs 0–319. Entries
+40–63 exist in RAM and never draw.
+
+`WorkingRam.v:41` gives `SR = {ic6D, ic6B}` with `ic6B` holding even addresses
+and `ic6D` odd, so a word's low byte is even and its high byte odd. With which
+phase reads which word, that fixes the entry:
+
+| Byte | Meaning | Source |
+|---|---|---|
+| 0 | picture code | `MotionObjectPictureRom.v:16-19`, latched from `SR[7:0]` |
+| 1 | vertical position | `MotionObjectVerticalControl.v:13`, read as `SR[15:8]` |
+| 2 | bit 7 = `MPI` | `MotionObjectBuffer.v:14-18`, latched from `SR[7]` |
+| 3 | horizontal position | `MotionObjectHorizontalControl.v`, loaded from `SR[15:8]` |
+
+### 13.2 Vertical extent
+
+`MotionObjectVerticalControl.v:13-20`: `sum = VC + SR[15:8]`, on this line while
+`sum[7:4]` is all ones, and `q = sum[3:0]` is the row. Sixteen values of `VC`
+put the sum in `F0..FF`, so an object is **sixteen lines tall**. A non-matching
+object forces every plane to `1111` (`MotionObjectPictureRom.v:68-70`), which is
+colour 7 — transparency is how "no object" is expressed, not a separate enable.
+
+### 13.3 The picture ROMs
+
+`addr = {picture, q ^ {4{PLAYER2}}, ~CK1 ^ PLAYER2}`, thirteen bits, one 2764.
+Each fetch yields three bit-planes of four pixels: `nib3 = data_ic8D[3:0]`,
+`nib2 = data_ic8B[7:4]`, `nib1 = data_ic8B[3:0]`. **Only the low nibble of `8D`
+is wired**; its high nibble goes nowhere. Two fetches make an object **8 wide by
+16 tall at 3 bits per pixel**, from `136022-106.8d` and `136022-107.8b`.
+
+`PLAYER2` (OUT1 bit 4, `HW.FLP`) mirrors both axes: it XORs the row with `0xF`,
+swaps which half is fetched first, and reads the shifters LSB-first instead of
+MSB-first (`MotionObjectPictureRom.v:104`).
+
+### 13.4 Arbitration, and what `MPI` means (**verified**)
+
+`ColorMemory.v:16-21`, implemented exactly in `video::cram_address` and checked
+against an independent re-evaluation on all 256 inputs. Three regimes:
+
+- `MV == 7` — the bitmap wins at `BITMAP_CRAM_BASE + BIT`, whatever `MPI` is.
+  This is §12.1's derivation as live code.
+- `MV < 7` with `MPI` clear, or over a dim bitmap pixel — the object wins, at
+  `{0, MPI, MV}`: entries 0–15.
+- `MV` in 1..=6 with `MPI` set over a bright pixel — the **bitmap** wins. So
+  `MPI` is a *behind-bright-bitmap* priority.
+
+**`MV == 0` is an exception to the last rule**: the first `sel` term is
+`(~MV[2] & ~MV[1] & ~MV[0])`, true only for `MV == 0`, and it forces the object
+through regardless of priority, landing at address 8. That falls out of the
+equations rather than being a special case anyone wrote.
+
+### 13.5 The one-line delay, and when the table is read (**measured**)
+
+Two line buffers alternate on `VC[0]` (`PositionControl.v`), one written while
+the other is read out and blanked behind itself (`MotionObjectBuffer.v:20`). A
+buffer filled while the counter reads `VC` is **displayed on line `VC + 1`** —
+`motion::DISPLAY_DELAY_LINES`.
+
+**When the table is sampled matters, and this part is measured rather than
+derived.** The game builds the table, the video reads it as the field is
+scanned, and the game parks it again — every entry `F0`, whose match window is
+`VC 00–0F` and so reaches no visible line — before the frame ends. A model
+compositing from SRAM at end of frame therefore sees an empty table. So
+`Machine::latch_motion_objects` copies the table and OUT1 at
+`FIRST_VISIBLE_LINE`, where the hardware starts reading it.
+
+A consequence worth stating because it looks like a fault and is not: **attract
+mode shows no characters**. The table is parked throughout it, and MAME agrees
+— both sides draw the castle and nobody in it. The characters appear when a
+game starts.
+
+### 13.6 What is not modelled
+
+The model composites **once per frame**, from the latched table. There is no
+scanline-level video model, and `harness.md` §13.6 records why building one is
+out of scope. A game that changed the table part-way down the field would be
+drawn as though it had not.

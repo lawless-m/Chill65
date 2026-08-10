@@ -63,8 +63,8 @@ CHILL65_CORPUS=/path/to/crystal-castles \
 ```
 
 It is gated on the machinery working, not on agreement — divergence against an
-external oracle is the output, since six hardware claims remain unverified and
-motion objects are unmodelled. Given a fault injected in a known place, it finds
+external oracle is the output, since six hardware claims remain unverified.
+Given a fault injected in a known place, it finds
 the frame and names the routine, twice running:
 
 ```
@@ -130,9 +130,19 @@ a WebAssembly problem. Separately, 85% of the game's hand-written control flow
 is *reducible*, so most of that state machine could become native `loop`/`if`.
 Both are recorded in `wasm.md` and neither is acted on.
 
-**Motion objects are not modelled**, so the browser page draws the castle and
-the crystals and no characters. Windowing and audio remain out of scope; the
-core stays headless and dependency-free.
+**Motion objects — the sprite hardware that draws the characters — are now
+modelled**, from the same RTL and verified against it: on a fixture that plants
+nine objects, our picture and the verilated core's agree to **zero differing
+pixels** over the 252 columns the core emits. Geometry could not be calibrated
+on a recording of the game, because our runtime and an oracle are not in the
+same game state during one; an original fixture program removes the game from
+the question, and needs no corpus.
+
+The characters appear when a game starts. Attract mode parks the object table,
+so it draws the castle and nobody in it — and MAME does the same.
+
+Windowing and audio remain out of scope; the core stays headless and
+dependency-free.
 
 See `atari-recompiler-plan.md` for the full plan, and:
 

@@ -26,6 +26,12 @@ about the hardware that are explicitly marked UNVERIFIED:
 6. Which CRAM entries a bitmap pixel selects is *derived* from the arbitration
    logic rather than measured, and motion objects are not modelled at all.
 
+**Claim 6 is now closed** — the list above is `gate2.md`'s, recorded as it stood.
+The arbitration is implemented and checked on all 256 inputs, motion objects are
+modelled and agree with the verilated core to zero differing pixels, and the
+three-bit colour expansion has been measured against MAME rather than assumed
+linear. See §14 and `hardware.md` §13. The other five stand.
+
 Against any external oracle, divergence is therefore **expected output**, not
 failure. A gate demanding frame equality would be one the project cannot pass,
 and an unattended loop would grind on it forever. What the harness is gated on
@@ -835,3 +841,80 @@ has gated on `087e02f4ca003874` at 12,288,528 cycles since Phase 2. Modelling
 scanout properly — which would also remove the mid-draw asymmetry above — is
 larger still and out of scope for this campaign. Both are recorded so that
 whoever wants them can see what they would cost.
+
+## 14. Motion objects, and what changed with them
+
+Modelling the sprite hardware changed the frame contract and moved two gated
+figures. Both movements are deliberate and neither weakened an assertion.
+
+### 14.1 The frame contract
+
+`Machine::framebuffer` now returns the **five-bit colour RAM address** per
+pixel, 0–31, after bitmap and motion objects have been arbitrated — not the raw
+four-bit bitmap nibble. `Video::framebuffer` is unchanged and is still the
+bitmap extraction. So a consumer wanting colour does `cram[pixel & 0x1F]` and
+nothing else, and `reference::rgb_from_indices` no longer adds
+`BITMAP_CRAM_BASE` itself.
+
+`Machine::frame_hash` stays FNV-1a over `framebuffer`, so **motion objects are
+inside the hash**. They have to be: a hash ignoring half the picture would let
+the sprite model be wrong with no comparison noticing.
+
+### 14.2 The attract hash moved
+
+```text
+before  087e02f4ca003874     after  97da8d4c1a48e694
+cycles  12,288,528           cycles 12,288,528
+```
+
+Same cycle count, because motion objects are a video-side read and touch no CPU
+execution. The attract test asserts *determinism*, not a constant, and still
+does. `gate2.md` through `gate5.md` keep the old figure: they record gates as
+they passed.
+
+Measured rather than assumed: with and without the picture ROMs the 600-frame
+attract hash is **identical** and sprite pixels are **zero**, so the whole move
+is the address-versus-index change. Attract mode has no characters in it.
+
+### 14.3 Why geometry was not calibrated on a trace
+
+The plan was to drive the lit-pixel surplus against MAME to zero over
+`gameplay.trace`. That cannot work, and the measurements say why: **our runtime
+and MAME are not in the same game state during a recorded trace.**
+
+- At frame 600 our object table is parked at `F0` on every line of the frame,
+  both halves — so we correctly draw nothing — while MAME draws four
+  character-sized clusters of 375 pixels each.
+- At frame 960 both sides have objects, but different ones in different places:
+  adding our sprites *raises* the differing-pixel count from 3,486 to 3,978.
+
+No sprite model reconciles that. The surplus was measuring game divergence.
+
+`chill65-diff/fixture/mob.MAC` removes the game instead — an original program of
+ours that plants nine known objects and idles — and is compared against the
+**verilated core**, which boots it because the simulation audits none of its
+seven devices. MAME will not: it checks its set against its own CRC-32s. Result:
+**896 lit pixels, zero differing**, over the columns the core emits. Horizontal
+origin, the one-line display delay, `MPI` polarity and the shift order all
+needed no correction.
+
+### 14.4 What the palette was hiding
+
+Chasing the above found something older. Our picture and MAME's at gameplay
+frame 600 were structurally identical — same six colours, counts matching to the
+pixel — yet 19,986 of 59,392 pixels differed, because the three-bit to eight-bit
+channel expansion was linear where MAME models the board's resistor ladder.
+`hardware.md` §12.2 has the measured table. Correcting it:
+
+```text
+differing pixels vs MAME, gameplay.trace
+  frame 500   20001 -> 1779
+  frame 600   19986 -> 1764
+  frame 960   21851 -> 2495
+  bounding box (0,0,255,231) -> (16,0,188,200)
+```
+
+It had been there since Phase 3, invisible to every lit-pixel measurement
+because those count non-black, and invisible to `frame_hash` because that hashes
+addresses rather than colours. Only pixel equality could see it, and pixel
+equality was never gated on.
