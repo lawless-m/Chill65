@@ -433,9 +433,63 @@ rather than taken.
 The simulation is deterministic: two runs byte-identical. It costs roughly half
 a second of wall clock per emulated frame, so it is used sparingly.
 
-One open question for the next task: by frame 240 the core has drawn almost
-nothing — a peak of **2** lit pixels across 20 distinct images — where our
-runtime's own `boot.rs` measures first draw at frame 162. Either the core boots
-more slowly, or frame numbering does not align between the two, or the VSYNC
-edge the harness counts frames on is not where it is assumed to be. Unresolved,
-and named rather than glossed.
+### 11.5 Boot timing: the core draws, later than we do
+
+The question left open above is answered. Run to 500 frames, the core draws:
+
+| Frame | Lit pixels |
+|---|---|
+| 0–150 | 0 |
+| 200 | 2 |
+| 350 | 176 |
+| 400 | 17,024 |
+| 450 | 32,573 |
+
+Our runtime's own `boot.rs` measures first draw at frame **162** and 33,238 lit
+pixels by frame 600. The core reaches a comparable picture, roughly **200 frames
+later**. Whether that is boot timing, a reset-release difference, or an offset
+in what each side counts as frame zero is not established — but the core is not
+broken, and the earlier reading of "barely draws" was a test that stopped at 240.
+
+### 11.6 Trackball injection
+
+The core takes quadrature, not counts. `SupportChips.v:297-307` is a
+free-running 9-bit counter exposing `count = counter[8:1]`, so **two quadrature
+half-steps make one CPU-visible count**. The simulation therefore emits two
+half-steps per unit of trace movement, at most one per pixel clock, so a frame's
+worth of motion is spread across the frame rather than delivered as a burst.
+
+The input file is byte-for-byte the one MAME is given — `<IN0 mask> <x> <y>` per
+frame, an absolute position rather than a delta — so a single serialiser feeds
+both oracles and the two adapters cannot drift apart.
+
+Which line of each quadrature pair leads is **not established**. `CCastles.v:292`
+wires `.X2(tb1HD), .Y2(tb1HC)` horizontally and `.X1(tb1VD), .Y1(tb1VC)`
+vertically; the harness treats the first of each pair as A. If that is backwards
+the axis simply runs the wrong way, which would show as inverted motion. Recorded
+rather than asserted, alongside the host-delta scaling `input.rs` already marks
+UNVERIFIED.
+
+### 11.7 Measured, and what it is worth
+
+```text
+mister determinism: 60 frames identical across two runs
+ours vs mister:     diverged at frame 0: 59392 pixels differ, none attributable
+```
+
+The simulation is deterministic across genuine re-simulations, not merely
+replays. And the comparison lands on the same wall MAME's did: **frame 0**,
+every pixel, nothing attributable — our white against the core's black, the
+colour-RAM reset difference of §11.3 and nothing to do with drawing.
+
+That is the useful result of this pass. Two independent oracles, built by
+different people from different sources, both power on black; we power on white;
+and in both comparisons that one difference at frame 0 hides everything that
+follows. The case for either matching their reset state or comparing from a
+later frame is now made twice over rather than once.
+
+Bounds on any comparison against this core, for whoever acts on it:
+
+- it emits **252 of 256 columns**, and the rest cannot be observed at its ports;
+- its picture arrives roughly 200 frames later than ours;
+- attribution comes from our side alone, since the core has no write log.

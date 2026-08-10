@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::images::workspace_root;
+use crate::reference::{Frame, Reference};
+use crate::trace::Trace;
 use crate::romset::{build_and_write, zip_path};
 
 /// Devices in `dn_addr[15:13]` order, from `ProgramMemory.v` and
@@ -134,12 +136,24 @@ fn member(zip: &[u8], name: &str) -> Result<Vec<u8>, String> {
     Err(format!("{name} is not in the archive"))
 }
 
-/// Build if needed, then run the core for `frames` frames.
+/// Build if needed, then run the core for `frames` frames with no input.
 pub fn capture(corpus: &Path, frames: u32) -> Result<Capture, String> {
+    capture_trace(corpus, &Trace::idle(frames as usize), frames)
+}
+
+/// Build if needed, then run the core driven from `trace`.
+pub fn capture_trace(corpus: &Path, trace: &Trace, frames: u32) -> Result<Capture, String> {
     let exe = build()?;
     let roms = rom_blob(corpus)?;
     let dir = sim_dir();
     let raw = dir.join("frames.raw");
+
+    // The same per-frame `<IN0 mask> <x> <y>` file MAME is given. Both oracles
+    // want an absolute trackball position rather than a delta, so one
+    // serialiser serves both and the two adapters cannot drift apart.
+    let input = dir.join("input.txt");
+    std::fs::write(&input, crate::mame::input_file(trace, frames))
+        .map_err(|e| format!("{}: {e}", input.display()))?;
 
     // Run from the simulation directory: ColorMemory.v initialises colour RAM
     // through a relative `$readmem` of "cram.rom", so the working directory
@@ -150,6 +164,7 @@ pub fn capture(corpus: &Path, frames: u32) -> Result<Capture, String> {
             roms.file_name().unwrap().to_str().unwrap(),
             "frames.raw",
             &frames.to_string(),
+            "input.txt",
         ])
         .output()
         .map_err(|e| format!("{}: {e}", exe.display()))?;
@@ -190,4 +205,49 @@ pub fn capture(corpus: &Path, frames: u32) -> Result<Capture, String> {
             .collect(),
         emitted,
     })
+}
+
+/// The verilated core behind the [`Reference`] seam.
+///
+/// Runs are cached by trace and frame count. The simulation costs roughly half
+/// a second of wall clock per emulated frame, so asking it the same question
+/// twice in one comparison would double a five-minute run for nothing.
+pub struct MisterReference {
+    corpus: PathBuf,
+    cache: Option<(String, u32, Vec<Vec<u8>>)>,
+}
+
+impl MisterReference {
+    /// `None` unless verilator is available.
+    pub fn discover(corpus: impl Into<PathBuf>) -> Option<MisterReference> {
+        have_verilator().then(|| MisterReference {
+            corpus: corpus.into(),
+            cache: None,
+        })
+    }
+
+    /// Drop any cached run, forcing the next call to re-simulate.
+    pub fn forget(&mut self) {
+        self.cache = None;
+    }
+}
+
+impl Reference for MisterReference {
+    fn run(&mut self, trace: &Trace, frames: u32, want_pixels: bool) -> Result<Vec<Frame>, String> {
+        let key = trace.serialise();
+        let fresh = match &self.cache {
+            Some((k, n, _)) if *k == key && *n >= frames => false,
+            _ => true,
+        };
+        if fresh {
+            let capture = capture_trace(&self.corpus, trace, frames)?;
+            self.cache = Some((key, frames, capture.frames));
+        }
+        let (_, _, frames_out) = self.cache.as_ref().expect("just populated");
+        Ok(frames_out
+            .iter()
+            .take(frames as usize)
+            .map(|rgb| Frame::new(rgb.clone(), want_pixels))
+            .collect())
+    }
 }

@@ -115,6 +115,14 @@ int main(int argc, char** argv) {
     // A ceiling, so a core that never syncs cannot hang the build.
     const long long max_ticks = 700000LL * (want_frames + 4);
 
+    // Quadrature state per axis, as a position in the Gray sequence
+    // 00 -> 01 -> 11 -> 10 -> 00.
+    static const int GRAY[4][2] = { {0,0}, {0,1}, {1,1}, {1,0} };
+    int phase_h = 0, phase_v = 0;
+    // Half-steps still owed to each axis, signed.
+    int owed_h = 0, owed_v = 0;
+    unsigned last_x = 0, last_y = 0;
+
     auto apply = [&](int f) {
         if ((size_t)f >= inputs.size()) return;
         const Input& in = inputs[f];
@@ -125,9 +133,38 @@ int main(int argc, char** argv) {
         dut->COINA     = (in.sw & 0x04) ? 1 : 0;
         dut->COINL     = (in.sw & 0x02) ? 1 : 0;
         dut->COINR     = (in.sw & 0x01) ? 1 : 0;
-        // Trackball quadrature is task #14's problem; the pins stay put here.
+
+        // The harness hands us an absolute position modulo 256, the same figure
+        // MAME's LETA fields are given. Turn the change since last frame into
+        // quadrature half-steps: SupportChips.v:297-307 exposes
+        // count = counter[8:1], so two half-steps make one CPU-visible count.
+        int dx = (int)in.x - (int)last_x;
+        if (dx > 128) dx -= 256; else if (dx < -128) dx += 256;
+        int dy = (int)in.y - (int)last_y;
+        if (dy > 128) dy -= 256; else if (dy < -128) dy += 256;
+        last_x = in.x;
+        last_y = in.y;
+        owed_h += dx * 2;
+        owed_v += dy * 2;
     };
     apply(0);
+
+    // Emit at most one half-step per axis per pixel clock, so a frame's worth of
+    // movement is spread across the frame rather than delivered as a burst.
+    auto step_quadrature = [&](void) {
+        if (owed_h > 0)      { phase_h = (phase_h + 1) & 3; owed_h--; }
+        else if (owed_h < 0) { phase_h = (phase_h + 3) & 3; owed_h++; }
+        if (owed_v > 0)      { phase_v = (phase_v + 1) & 3; owed_v--; }
+        else if (owed_v < 0) { phase_v = (phase_v + 3) & 3; owed_v++; }
+        // CCastles.v:292 wires .X2(tb1HD), .Y2(tb1HC) as the horizontal pair and
+        // .X1(tb1VD), .Y1(tb1VC) as the vertical. Which of each pair leads is
+        // not established, so a reversed axis would show as inverted motion --
+        // recorded, not asserted.
+        dut->tb1HD = GRAY[phase_h][0];
+        dut->tb1HC = GRAY[phase_h][1];
+        dut->tb1VD = GRAY[phase_v][0];
+        dut->tb1VC = GRAY[phase_v][1];
+    };
 
     for (long long t = 0; t < max_ticks && captured < want_frames; t++) {
         tick();
@@ -167,6 +204,7 @@ int main(int argc, char** argv) {
                 if (x > emitted_max) emitted_max = x;
             }
             phase ^= 1;
+            if (phase == 0) step_quadrature();
         }
     }
 
