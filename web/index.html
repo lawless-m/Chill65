@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<!--
+  Crystal Castles in a browser, on chill65-runtime compiled to WebAssembly.
+
+  Self-contained on purpose: no framework, no CDN, no wasm-bindgen glue. The
+  page is three files and the module's own C ABI.
+
+  It is served from `target/web`, which `tools/stage-web.sh` fills:
+
+      bash tools/stage-web.sh
+      python3 -m http.server --directory target/web 8000
+      # then open http://localhost:8000/
+
+  A server is needed rather than opening the file directly, because `fetch` of
+  a `file://` URL is blocked and `WebAssembly.instantiateStreaming` wants a real
+  `application/wasm` content type.
+
+  `chill65.wasm`, `prog.bin` and `data.bin` are built from the game source and
+  are **not** in this repository (plan §9). They appear in `target/web` only on
+  a machine that has the corpus.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chill65 — Crystal Castles</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0;
+    background: #101014;
+    color: #c8c8d0;
+    font: 14px/1.5 ui-monospace, "DejaVu Sans Mono", monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.5rem 1rem;
+  }
+  h1 { font-size: 1rem; font-weight: normal; margin: 0; letter-spacing: 0.08em; }
+  h1 span { color: #6a6a78; }
+
+  /* The machine's picture is 256x232. Scaled up without smoothing, because a
+     bitmap of palette indices has no business being interpolated. */
+  canvas {
+    width: min(768px, 96vw);
+    image-rendering: pixelated;
+    background: #000;
+    border: 1px solid #2a2a34;
+    cursor: crosshair;
+  }
+
+  #status { color: #6a6a78; min-height: 1.5em; text-align: center; }
+  #status.error { color: #d06a6a; }
+
+  table { border-collapse: collapse; color: #8a8a98; }
+  td { padding: 0.1rem 0.75rem 0.1rem 0; }
+  kbd {
+    background: #1c1c24;
+    border: 1px solid #2a2a34;
+    border-radius: 3px;
+    padding: 0 0.35rem;
+    color: #c8c8d0;
+  }
+</style>
+</head>
+<body>
+
+<h1>Chill65 <span>— Crystal Castles, statically recompiled</span></h1>
+
+<canvas id="screen" width="256" height="232"></canvas>
+
+<div id="status">loading…</div>
+
+<table>
+  <tr><td><kbd>click</kbd> the picture</td><td>capture the mouse as the trackball — <kbd>Esc</kbd> releases it</td></tr>
+  <tr><td><kbd>1</kbd> <kbd>2</kbd></td><td>start / jump, player 1 and 2</td></tr>
+  <tr><td><kbd>5</kbd> <kbd>6</kbd> <kbd>7</kbd></td><td>coin left, right, aux</td></tr>
+  <tr><td><kbd>T</kbd></td><td>self-test</td></tr>
+  <tr><td><kbd>S</kbd></td><td>slam</td></tr>
+  <tr><td><kbd>D</kbd></td><td>toggle compiled dispatch</td></tr>
+</table>
+
+<script src="app.js" type="module"></script>
+</body>
+</html>
