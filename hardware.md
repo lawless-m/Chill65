@@ -872,10 +872,16 @@ compositing from SRAM at end of frame therefore sees an empty table. So
 `Machine::latch_motion_objects` copies the table and OUT1 at
 `FIRST_VISIBLE_LINE`, where the hardware starts reading it.
 
-A consequence worth stating because it looks like a fault and is not: **attract
-mode shows no characters**. The table is parked throughout it, and MAME agrees
-— both sides draw the castle and nobody in it. The characters appear when a
-game starts.
+A consequence worth stating because it looks like a fault and is not:
+**early attract mode shows no characters.** The table is parked through it —
+measured on `idle-attract`, empty at frame 600 — so the castle draws with nobody
+in it. The demo later in the attract cycle does have characters: at frame 1100,
+about 18 seconds in, our picture gains 570 lit pixels and MAME's gains 566. Both
+sides, the same frame.
+
+So "no characters" is true of the first part of attract and false of the rest,
+and the two are easy to mistake for a fault in whichever one you happen to look
+at.
 
 ### 13.6 What is not modelled
 

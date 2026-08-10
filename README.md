@@ -138,8 +138,9 @@ on a recording of the game, because our runtime and an oracle are not in the
 same game state during one; an original fixture program removes the game from
 the question, and needs no corpus.
 
-The characters appear when a game starts. Attract mode parks the object table,
-so it draws the castle and nobody in it — and MAME does the same.
+Early attract parks the object table, so it draws the castle and nobody in it;
+the demo later in the cycle has characters, appearing on the same frame in our
+build and in MAME. And they appear when a game starts.
 
 Windowing and audio remain out of scope; the core stays headless and
 dependency-free.
