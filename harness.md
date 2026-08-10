@@ -346,8 +346,96 @@ game has written CRAM, the way `idle-attract.trace` already waits out the
 self-test. That is recorded here rather than done, because it changes what the
 gate measures and deserves its own decision.
 
-## 11. The MiSTer RTL oracle
+## 11. The verilated MiSTer core
 
-Not yet built. Verilator 5.032 is installed. This section will carry the
-`dn_addr` download map, the quadrature scaling decision, the RGB expansion, and
-the first observed divergence with its attribution.
+Verilator 5.032 against `Arcade-CrystalCastles_MiSTer`, which is third-party
+reference material and is **never modified**. Verilator 5 is stricter than the
+4.x era that core was written against, so every accommodation is a flag
+(`tools/build-mister-sim.sh`):
+
+- `--no-timing` — the RTL uses `#1` delays throughout, a simulation nicety
+  rather than behaviour, and verilator 5 refuses to guess.
+- `-Wno-fatal` — lint findings are reported but do not stop the build. They
+  concern code that synthesises perfectly well for the FPGA the core targets.
+
+Both source directories are passed with `-y`, and every `rtl/*.v` except the
+Altera-specific `pll.v` is named explicitly, because several modules — `sram`
+among them — live in files not named after them.
+
+### 11.1 The download map
+
+The core takes ROMs through `dn_clk`/`dn_wr`/`dn_addr`/`dn_data`, with
+`dn_addr[15:13]` selecting one of seven 8K devices (`ProgramMemory.v`,
+`MotionObjectPictureRom.v`):
+
+| `dn_addr[15:13]` | Device | Our member |
+|---|---|---|
+| 0 | ic1F | `136022-101.1f` |
+| 1 | ic1H | `136022-102.1h` |
+| 2 | ic8D | `136022-106.8d` |
+| 3 | ic8B | `136022-107.8b` |
+| 4 | ic1K | `136022-303.1k` |
+| 5 | ic1L | `136022-304.1l` |
+| 6 | ic1N | `136022-305.1n` |
+
+That is exactly the part order of the core's own `.mra`, so the blob is those
+seven members concatenated. The four PROMs are not downloaded; the core does not
+model them.
+
+### 11.2 The observable window is 252 pixels, not 256
+
+The top-level `HBLANK` is `HBLANK2`, the *delayed* blanking — set at hcount 259,
+cleared at hcount 7 (`SyncChain.v:35-38`) — and `RGBout` is forced to zero
+whenever it is asserted (`CCastles.v:353`). So the core emits **252 pixels per
+line**. The first columns are blanked at the port and cannot be observed from
+outside at all.
+
+This is a property of the core's interface, not something a flag fixes. The
+simulation reports the widest active line it saw and the harness records it, so
+any comparison must confine itself to the columns the core actually emits rather
+than pretending the rest are black. Colour is expanded from `RGBout[8:6]`,
+`[5:3]`, `[2:0]` with the same `v * 255 / 7` scaling `cram_rgb` uses, so the two
+implementations are directly comparable.
+
+### 11.3 Colour RAM at power-on — our runtime is the outlier
+
+`ColorMemory.v` initialises colour RAM through a relative `$readmem` of
+`cram.rom`, so the simulation's **working directory** decides whether the core
+powers on with its intended palette. Run from elsewhere, verilator warns and
+leaves CRAM zeroed.
+
+That file is 32 entries, all `000` **except entry 16, which is `1FF`**. Entry 16
+is `BITMAP_CRAM_BASE` — the entry a bitmap pixel of zero selects — and `1FF`
+inverts to black. So the core powers on with a **black** background.
+
+Measured, all three implementations from cold:
+
+| Implementation | Frame 0 |
+|---|---|
+| MAME | black |
+| MiSTer core, `cram.rom` loaded | black |
+| MiSTer core, `cram.rom` missing | white (an artefact, not the core's behaviour) |
+| **`chill65-runtime`** | **white** |
+
+`Video::new` sets `cram: [0; 32]`, and a zeroed entry 16 decodes to full white.
+So on this point **our reset state disagrees with both external oracles**, and
+that — not anything about drawing — is what §10.4's frame-0 divergence against
+MAME actually is.
+
+On real hardware colour RAM is RAM and its power-on contents are undefined, so
+this is not a proven modelling error. But two independent implementations chose
+black, the disagreement masks every later divergence, and matching them would
+cost one line. That is a decision to take deliberately, and it is recorded here
+rather than taken.
+
+### 11.4 Measured
+
+The simulation is deterministic: two runs byte-identical. It costs roughly half
+a second of wall clock per emulated frame, so it is used sparingly.
+
+One open question for the next task: by frame 240 the core has drawn almost
+nothing — a peak of **2** lit pixels across 20 distinct images — where our
+runtime's own `boot.rs` measures first draw at frame 162. Either the core boots
+more slowly, or frame numbering does not align between the two, or the VSYNC
+edge the harness counts frames on is not where it is assumed to be. Unresolved,
+and named rather than glossed.

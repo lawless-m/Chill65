@@ -1,0 +1,193 @@
+//! The verilated MiSTer core as an external oracle.
+//!
+//! `Arcade-CrystalCastles_MiSTer` is third-party reference material and is
+//! **never modified**. Verilator 5 is stricter than the 4.x era that core was
+//! written against, so every accommodation is a flag — see
+//! `tools/build-mister-sim.sh`.
+//!
+//! # Gating
+//!
+//! Needs `verilator` on `PATH` and `CHILL65_CORPUS` set. Either missing means
+//! callers skip cleanly.
+//!
+//! # The observable window
+//!
+//! The core's top-level `HBLANK` is `HBLANK2`, the *delayed* blanking — set at
+//! hcount 259 and cleared at hcount 7 (`SyncChain.v:35-38`) — and `RGBout` is
+//! forced to zero whenever it is asserted (`CCastles.v:353`). So the core emits
+//! **252 pixels per line**, not 256: the first columns are blanked at the port
+//! and simply cannot be observed from outside.
+//!
+//! That is a property of the core's interface, not something a flag fixes. The
+//! simulation reports the widest active line it saw and the Rust side records
+//! it, so a comparison against these frames must confine itself to the columns
+//! the core actually emits rather than pretending the rest are black.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::images::workspace_root;
+use crate::romset::{build_and_write, zip_path};
+
+/// Devices in `dn_addr[15:13]` order, from `ProgramMemory.v` and
+/// `MotionObjectPictureRom.v`: 0 ic1F, 1 ic1H, 2 ic8D, 3 ic8B, 4 ic1K, 5 ic1L,
+/// 6 ic1N.
+const DOWNLOAD_ORDER: [&str; 7] = [
+    "136022-101.1f",
+    "136022-102.1h",
+    "136022-106.8d",
+    "136022-107.8b",
+    "136022-303.1k",
+    "136022-304.1l",
+    "136022-305.1n",
+];
+
+/// What the simulation reported about the frames it produced.
+pub struct Capture {
+    /// Canonical 256x232 RGB24 frames, left-aligned, unemitted columns zero.
+    pub frames: Vec<Vec<u8>>,
+    /// Pixels per line the core actually emitted — 252 for this core.
+    pub emitted: usize,
+}
+
+/// Is verilator available?
+pub fn have_verilator() -> bool {
+    Command::new("verilator")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn sim_dir() -> PathBuf {
+    workspace_root().join("target/mister-sim")
+}
+
+/// Build the simulation, if it is not already built.
+pub fn build() -> Result<PathBuf, String> {
+    let exe = sim_dir().join("mistersim");
+    if exe.exists() {
+        return Ok(exe);
+    }
+    let script = workspace_root().join("tools/build-mister-sim.sh");
+    let out = Command::new("sh")
+        .arg(&script)
+        .current_dir(workspace_root())
+        .output()
+        .map_err(|e| format!("{}: {e}", script.display()))?;
+    if !out.status.success() {
+        return Err(format!(
+            "build-mister-sim failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    if !exe.exists() {
+        return Err(format!("{} was not produced", exe.display()));
+    }
+    Ok(exe)
+}
+
+/// Write the seven-device blob the core's download port expects.
+fn rom_blob(corpus: &Path) -> Result<PathBuf, String> {
+    if !zip_path().exists() {
+        let (set, _) = build_and_write(corpus)?;
+        if !set.all_ok() {
+            return Err("the rebuilt ROM set does not match MAME's CRCs".into());
+        }
+    }
+    // Read the members back out of the archive we just verified, rather than
+    // rebuilding them by a second route that could drift.
+    let (set, _) = build_and_write(corpus)?;
+    let _ = &set;
+
+    let dir = sim_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let path = dir.join("roms.bin");
+
+    let mut blob = Vec::with_capacity(DOWNLOAD_ORDER.len() * 0x2000);
+    let archive = std::fs::read(zip_path()).map_err(|e| format!("{}: {e}", e))?;
+    for name in DOWNLOAD_ORDER {
+        blob.extend_from_slice(&member(&archive, name)?);
+    }
+    std::fs::write(&path, &blob).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Pull one stored member out of the archive our own writer produced.
+///
+/// Only the `stored` method is ever written, so a member is its bytes verbatim
+/// after the local header — no decompression to implement.
+fn member(zip: &[u8], name: &str) -> Result<Vec<u8>, String> {
+    let mut off = 0usize;
+    while off + 30 <= zip.len() && &zip[off..off + 4] == b"PK\x03\x04" {
+        let size = u32::from_le_bytes(zip[off + 18..off + 22].try_into().unwrap()) as usize;
+        let name_len = u16::from_le_bytes(zip[off + 26..off + 28].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(zip[off + 28..off + 30].try_into().unwrap()) as usize;
+        let start = off + 30 + name_len + extra_len;
+        let this = std::str::from_utf8(&zip[off + 30..off + 30 + name_len])
+            .map_err(|e| format!("member name: {e}"))?;
+        if this == name {
+            return Ok(zip[start..start + size].to_vec());
+        }
+        off = start + size;
+    }
+    Err(format!("{name} is not in the archive"))
+}
+
+/// Build if needed, then run the core for `frames` frames.
+pub fn capture(corpus: &Path, frames: u32) -> Result<Capture, String> {
+    let exe = build()?;
+    let roms = rom_blob(corpus)?;
+    let dir = sim_dir();
+    let raw = dir.join("frames.raw");
+
+    // Run from the simulation directory: ColorMemory.v initialises colour RAM
+    // through a relative `$readmem` of "cram.rom", so the working directory
+    // decides whether the core powers on with its intended palette.
+    let out = Command::new(&exe)
+        .current_dir(&dir)
+        .args([
+            roms.file_name().unwrap().to_str().unwrap(),
+            "frames.raw",
+            &frames.to_string(),
+        ])
+        .output()
+        .map_err(|e| format!("{}: {e}", exe.display()))?;
+    if !out.status.success() {
+        return Err(format!(
+            "mistersim failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+
+    let dims = std::fs::read_to_string(dir.join("frames.raw.dims"))
+        .map_err(|e| format!("dims sidecar: {e}"))?;
+    let fields: Vec<usize> = dims
+        .split_whitespace()
+        .filter_map(|f| f.parse().ok())
+        .collect();
+    let [w, h, emitted] = fields[..] else {
+        return Err(format!("cannot parse dims {dims:?}"));
+    };
+    if (w, h) != (chill65_runtime::video::WIDTH, chill65_runtime::video::HEIGHT) {
+        return Err(format!("the simulation produced {w}x{h} frames"));
+    }
+
+    let blob = std::fs::read(&raw).map_err(|e| format!("{}: {e}", raw.display()))?;
+    let stride = w * h * 3;
+    if blob.len() < stride * frames as usize {
+        return Err(format!(
+            "captured {} bytes, want {} frames of {stride}",
+            blob.len(),
+            frames
+        ));
+    }
+    Ok(Capture {
+        frames: blob
+            .chunks_exact(stride)
+            .take(frames as usize)
+            .map(<[u8]>::to_vec)
+            .collect(),
+        emitted,
+    })
+}
