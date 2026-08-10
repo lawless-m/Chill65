@@ -17,9 +17,18 @@
 //!
 //! - [`trace`] — the recorded input format: per-frame trackball deltas and
 //!   switch levels, and the parser and serialiser for it.
+//! - [`reference`] — the oracle seam and the canonical frame every
+//!   implementation is compared in.
+//! - [`ours`] — our own runtime behind that seam.
+//! - [`images`] — assembling the ROM images to run, from the corpus.
 //!
 //! No third-party dependencies, matching the rest of the workspace.
 
+pub mod images;
+pub mod ours;
+pub mod reference;
 pub mod trace;
 
+pub use ours::OurRuntime;
+pub use reference::{Frame, Reference};
 pub use trace::{FrameInput, Switches, Trace, TraceError};
