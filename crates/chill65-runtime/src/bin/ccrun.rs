@@ -24,6 +24,9 @@ usage: ccrun <prog.bin> <data.bin> [options]
 
   <prog.bin>       24576-byte program image (A000-FFFF)
   <data.bin>       16384-byte castle data image (A000-DFFF)
+  [mob.bin]        optional 16384-byte motion-object picture ROMs
+                   (136022-106.8d then 136022-107.8b); without it no
+                   motion objects are drawn
 
 options:
   --frames N       frames to run (default 600)
@@ -65,9 +68,9 @@ fn run() -> Result<(), String> {
         }
     }
 
-    if positional.len() != 2 {
+    if positional.len() < 2 || positional.len() > 3 {
         eprint!("{USAGE}");
-        return Err("expected exactly two image paths".into());
+        return Err("expected two image paths, or three with the motion ROMs".into());
     }
 
     let prog = std::fs::read(&positional[0]).map_err(|e| format!("{}: {e}", positional[0]))?;
@@ -75,6 +78,13 @@ fn run() -> Result<(), String> {
 
     let mut machine = Machine::new();
     machine.load_roms(&prog, &data)?;
+
+    // Optional: without it the machine runs exactly as it always has, drawing
+    // the bitmap and no motion objects.
+    if let Some(path) = positional.get(2) {
+        let mob = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        machine.load_motion_roms(&mob)?;
+    }
 
     let mut cpu = Cpu::new();
     cpu.reset(&mut machine);

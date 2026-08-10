@@ -70,6 +70,21 @@ pub struct Machine {
     /// `A000-DFFF` in bank 1 — the castle data image.
     pub data: Box<[u8; 0x4000]>,
 
+    /// The motion-object picture ROMs, `136022-106.8d` then `136022-107.8b`,
+    /// 8192 bytes each.
+    ///
+    /// **Not on the CPU bus.** These are read by the video hardware alone, so
+    /// unlike `prog` and `data` they never appear in the memory map — which is
+    /// why they arrive through their own loader rather than through
+    /// [`Machine::load_roms`].
+    pub mob_rom: Box<[u8; 0x4000]>,
+    /// Whether [`Machine::load_motion_roms`] has been called.
+    ///
+    /// False means motion objects render as absent everywhere, so a machine
+    /// built without them — every unit test, and the committed fixture program
+    /// — behaves exactly as it did before they existed.
+    pub motion_roms_loaded: bool,
+
     /// The OUT0 addressable latch. One bit per address, taken from D0.
     ///
     /// Known bits, from the game's equates in `CG.MAC`: bit 0 `HW.TL` = `9E80`
@@ -152,6 +167,8 @@ impl Machine {
             earom: Box::new([0; 0x100]),
             prog: Box::new([0; 0x6000]),
             data: Box::new([0; 0x4000]),
+            mob_rom: Box::new([0; 0x4000]),
+            motion_roms_loaded: false,
             out0: 0,
             out1: 0,
             video: Video::new(),
@@ -234,6 +251,29 @@ impl Machine {
         }
         self.prog.copy_from_slice(prog);
         self.data.copy_from_slice(data);
+        Ok(())
+    }
+
+    /// Load the motion-object picture ROMs: 16384 bytes, `136022-106.8d`
+    /// followed by `136022-107.8b`.
+    ///
+    /// That is the order `chill65-diff`'s `romset.rs` slices them out of the
+    /// corpus file `372BR.RS4`, and the order MAME's `ccastles3` set names
+    /// them, so one layout serves the runtime, the ROM-set reconstruction and
+    /// the oracle without a translation step anywhere.
+    ///
+    /// Separate from [`Machine::load_roms`] because these ROMs are not on the
+    /// CPU bus and because a machine without them must keep working: leave
+    /// this uncalled and motion objects are simply absent.
+    pub fn load_motion_roms(&mut self, image: &[u8]) -> Result<(), String> {
+        if image.len() != 0x4000 {
+            return Err(format!(
+                "motion-object image is {} bytes, expected 16384 (8d then 8b)",
+                image.len()
+            ));
+        }
+        self.mob_rom.copy_from_slice(image);
+        self.motion_roms_loaded = true;
         Ok(())
     }
 
@@ -820,5 +860,28 @@ mod tests {
         cpu.step(&mut m).unwrap();
         assert!(!m.data_bank_selected(), "bank 0 selected, as the ROM intends");
         assert_eq!(m.cycles, 6, "the bus clocked from the CPU");
+    }
+
+    /// A machine without picture ROMs is the machine we already had.
+    #[test]
+    fn motion_roms_are_optional_and_size_checked() {
+        let mut m = Machine::new();
+        assert!(!m.motion_roms_loaded, "absent until loaded");
+        assert!(m.mob_rom.iter().all(|&b| b == 0));
+
+        assert!(
+            m.load_motion_roms(&[0u8; 0x2000]).is_err(),
+            "one device is not the pair"
+        );
+        assert!(!m.motion_roms_loaded, "a rejected image must not count as loaded");
+
+        let mut image = vec![0u8; 0x4000];
+        image[0] = 0xA5;
+        image[0x2000] = 0x5A;
+        m.load_motion_roms(&image).expect("the pair");
+        assert!(m.motion_roms_loaded);
+        // 8d first, 8b second -- the order romset.rs slices 372BR.RS4.
+        assert_eq!(m.mob_rom[0], 0xA5);
+        assert_eq!(m.mob_rom[0x2000], 0x5A);
     }
 }
