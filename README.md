@@ -5,15 +5,18 @@ original assembly source into Rust for native and WebAssembly targets.
 
 First target: **Crystal Castles** (Atari, 1983).
 
-![Crystal Castles attract mode, rendered by chill65-runtime](docs/attract.png)
+![Crystal Castles level 1, played in a browser on chill65-wasm](docs/gameplay.png)
 
-*Attract mode at frame 600 — assembled from the original 1983 MACRO-11 source by
-`chill65-asm`, executed by `chill65-runtime`, and coloured through the board's
-own colour RAM. No game code or ROMs are distributed here; see below.*
+*Level 1, played in a browser. The castle, the gems and the text are drawn by
+the CPU into main RAM; Bentley Bear and the gem eater beside him are **motion
+objects**, drawn by the sprite hardware and composited through the board's own
+colour arbitration. Assembled from the original 1983 MACRO-11 source by
+`chill65-asm`, executed by `chill65-runtime` compiled to WebAssembly. No game
+code or ROMs are distributed here; see below.*
 
 ## Status
 
-**Phases 0 through 5 complete and gated.**
+**Phases 0 through 5 complete and gated, and the game is playable.**
 
 **Phase 1 — the assembler.** `chill65-asm` reassembles the original Atari source
 to output byte-identical with the original toolchain's own: 24,576 bytes of
@@ -130,20 +133,33 @@ a WebAssembly problem. Separately, 85% of the game's hand-written control flow
 is *reducible*, so most of that state machine could become native `loop`/`if`.
 Both are recorded in `wasm.md` and neither is acted on.
 
-**Motion objects — the sprite hardware that draws the characters — are now
-modelled**, from the same RTL and verified against it: on a fixture that plants
-nine objects, our picture and the verilated core's agree to **zero differing
-pixels** over the 252 columns the core emits. Geometry could not be calibrated
-on a recording of the game, because our runtime and an oracle are not in the
-same game state during one; an original fixture program removes the game from
-the question, and needs no corpus.
+**Motion objects — the characters.** The sprite hardware is modelled from the
+same RTL and **verified against it**: on a fixture that plants nine objects, our
+picture and the verilated MiSTer core's agree to **zero differing pixels** over
+the 252 columns the core emits.
 
-Early attract parks the object table, so it draws the castle and nobody in it;
-the demo later in the cycle has characters, appearing on the same frame in our
-build and in MAME. And they appear when a game starts.
+```
+cargo test -p chill65-diff --test mob_fixture -- --ignored --nocapture
+```
 
-Windowing and audio remain out of scope; the core stays headless and
-dependency-free.
+Geometry could not be calibrated on a recording of the game, because our runtime
+and an oracle are not in the same game state during one — at one frame our
+object table is parked while MAME draws four characters. An original fixture
+program removes the game from the question, and needs no corpus at all: two
+independent readings of the same RTL, with no game bytes taking part. The gate
+has a control that withholds the picture ROMs and requires the comparison to
+*fail*, so it cannot pass vacuously.
+
+Chasing that found something older. Our three-bit-to-eight colour expansion was
+linear where the board has a **1 kΩ / 2.2 kΩ / 4.7 kΩ resistor ladder**, which
+had made roughly 20,000 of 59,392 pixels differ from MAME on a picture that was
+otherwise identical — invisible to every lit-pixel measurement and to the frame
+hash, and so unnoticed since Phase 3. `hardware.md` §12.2 has the measured
+table.
+
+**Playable.** The milestone Phase 2 left open is closed: the game has been
+played to a high score in a browser, on a trackball. Windowing and audio remain
+out of scope; the core stays headless and dependency-free.
 
 See `atari-recompiler-plan.md` for the full plan, and:
 
@@ -165,6 +181,7 @@ See `atari-recompiler-plan.md` for the full plan, and:
 | `gate4.md` | The Phase 4 gate: a majority of executed instructions compiled, indistinguishable from interpreting them |
 | `wasm.md` | **The Phase 5 deliverable.** The constraints WebAssembly imposed and how each was resolved, reducibility answered, size and performance measured |
 | `gate5.md` | The Phase 5 gate: the wasm build's frame hashes identical to native on every trace, both dispatch modes |
+| `hardware.md` §13 | Motion objects as modelled, and verified against the core to zero differing pixels |
 | `LOOP.md` | Working scope and stop conditions |
 
 ## You must supply your own game source
