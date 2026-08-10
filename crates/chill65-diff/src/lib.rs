@@ -22,6 +22,7 @@
 //! - [`diverge`] — comparing two per-frame hash streams, and their file form.
 //! - [`symbols`] — the assembler's symbol table, and naming an address.
 //! - [`localise`] — blaming the routine behind a divergence.
+//! - [`mame`] — MAME as an external oracle: boot the set, capture frames.
 //! - [`romset`] — rebuilding MAME's `ccastles3` set from the corpus, with
 //!   [`crc32`], [`zip`] and [`lda`] as its parts.
 //! - [`ours`] — our own runtime behind that seam.
@@ -34,6 +35,7 @@ pub mod diverge;
 pub mod images;
 pub mod lda;
 pub mod localise;
+pub mod mame;
 pub mod ours;
 pub mod reference;
 pub mod romset;
