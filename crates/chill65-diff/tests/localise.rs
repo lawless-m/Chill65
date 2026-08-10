@@ -27,7 +27,7 @@
 //! 56,836 of 59,392 pixels differing, all attributed to `BITEST`. The flipped
 //! byte's own routine never gets a chance to draw anything wrong.
 //!
-//! The checksum is a longitudinal parity — `EOR NY,TEMP1` in `CST.MAC:337` —
+//! The checksum is a longitudinal parity — `EOR NY,TEMP1` in `CST.MAC:331` —
 //! so flipping the same bit in *two* bytes of the same 8K device leaves it
 //! unchanged. This fixture flips bit 0 at `A408` and `A418`, both inside
 //! `LN.F1`, both in device `136022-303.1k`:
