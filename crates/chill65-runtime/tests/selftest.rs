@@ -125,9 +125,12 @@ struct Run {
 
 /// Boot the machine on these images and run until the ROM test reaches a
 /// verdict.
-fn run_rom_test(prog: &[u8], data: &[u8]) -> Run {
+fn run_rom_test(prog: &[u8], data: &[u8], mob: Option<&[u8]>) -> Run {
     let mut m = Machine::new();
     m.load_roms(prog, data).expect("load");
+    if let Some(mob) = mob {
+        m.load_motion_roms(mob).expect("motion roms");
+    }
     let mut cpu = Cpu::new();
     cpu.reset(&mut m);
 
@@ -212,7 +215,8 @@ fn the_games_own_rom_test_passes() {
     };
 
     let (prog, data) = common::build_images(&corpus);
-    let run = run_rom_test(&prog, &data);
+    let mob = common::motion_rom_image(&corpus);
+    let run = run_rom_test(&prog, &data, Some(&mob));
 
     eprintln!(
         "self-test: ROMTST at {} cycles, GOTCHK at {} ({} cycles scanning 40K \
@@ -278,11 +282,12 @@ fn a_corrupted_rom_is_detected() {
     };
 
     let (mut prog, data) = common::build_images(&corpus);
+    let mob = common::motion_rom_image(&corpus);
     // Flip a bit well away from the vectors and the boot path, so the machine
     // still runs normally and the checksum is the only thing that changes.
     prog[0x0100] ^= 0x01;
 
-    let run = run_rom_test(&prog, &data);
+    let run = run_rom_test(&prog, &data, Some(&mob));
     match run.verdict {
         Verdict::Failed { checksums } => {
             eprintln!("corrupted ROM correctly rejected: checksums {checksums:02X?}");

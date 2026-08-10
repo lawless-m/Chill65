@@ -104,7 +104,12 @@ fn run() -> Result<(), String> {
     if quiet {
         println!("{hash:016x}");
     } else {
-        let lit = picture.iter().filter(|&&p| p != 0).count();
+        // The background is now colour RAM entry BITMAP_CRAM_BASE, not 0, so
+        // counting non-zero would count nearly every pixel.
+        let lit = picture
+            .iter()
+            .filter(|&&p| p != BITMAP_CRAM_BASE as u8)
+            .count();
         println!(
             "frames {frames}, cycles {}, hash {hash:016x}\n\
              lit pixels {lit}/{}, watchdog strobes {}{}, bank switches {}",
@@ -130,7 +135,8 @@ fn write_ppm(path: &str, picture: &[u8], cram: &[u16; 32]) -> Result<(), String>
     let mut out = Vec::with_capacity(15 + WIDTH * HEIGHT * 3);
     out.extend_from_slice(format!("P6\n{WIDTH} {HEIGHT}\n255\n").as_bytes());
     for &pixel in picture {
-        let entry = cram[(BITMAP_CRAM_BASE + pixel as usize) & 0x1F];
+        // The framebuffer already carries the arbitrated colour RAM address.
+        let entry = cram[pixel as usize & 0x1F];
         let (r, g, b) = cram_rgb(entry);
         out.extend_from_slice(&[r, g, b]);
     }

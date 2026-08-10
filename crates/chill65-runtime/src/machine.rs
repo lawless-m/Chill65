@@ -301,12 +301,56 @@ impl Machine {
         }
     }
 
-    /// The visible picture, one byte per pixel, each 0–15.
+    /// The visible picture, one byte per pixel: the **five-bit colour RAM
+    /// address**, 0–31, after bitmap and motion objects have been arbitrated.
+    ///
+    /// # This is not the bitmap index
+    ///
+    /// It was, until motion objects existed. `Video::framebuffer` still returns
+    /// the raw 4-bit bitmap nibbles and is still the bitmap extraction; this
+    /// composites motion objects over them through
+    /// [`crate::video::cram_address`], which is the arbitration
+    /// `ColorMemory.v:16-21` performs. The result indexes `video.cram`
+    /// directly, so a consumer wanting colour does `cram[pixel & 0x1F]` and
+    /// nothing else.
+    ///
+    /// With no picture ROMs loaded every pixel is `MV = 7` — no object — and
+    /// the result is exactly `BITMAP_CRAM_BASE + nibble`, which is what the old
+    /// contract meant. So a machine without them behaves as it always did, one
+    /// constant offset aside.
     pub fn framebuffer(&self) -> Vec<u8> {
-        self.video.framebuffer(&self.ram[..])
+        let bitmap = self.video.framebuffer(&self.ram[..]);
+        if !self.motion_roms_loaded {
+            return bitmap
+                .iter()
+                .map(|&nibble| (crate::video::BITMAP_CRAM_BASE + nibble as usize) as u8)
+                .collect();
+        }
+
+        let mut out = Vec::with_capacity(bitmap.len());
+        for line in 0..HEIGHT {
+            // A line buffer is filled while the vertical counter reads one
+            // line and displayed on the next, so the objects visible here were
+            // evaluated a line earlier. `FIRST_VISIBLE_LINE` maps the picture's
+            // row 0 onto the counter.
+            let vc = (line as u32 + crate::frame::FIRST_VISIBLE_LINE)
+                .wrapping_sub(crate::motion::DISPLAY_DELAY_LINES as u32) as u8;
+            let objects =
+                crate::motion::render_line(&self.sram[..], &self.mob_rom[..], self.out1, vc);
+            for x in 0..WIDTH {
+                let nibble = bitmap[line * WIDTH + x];
+                let p = objects[x];
+                out.push(crate::video::cram_address(p.mv, p.mpi, nibble) as u8);
+            }
+        }
+        out
     }
 
     /// A stable identity for the current picture.
+    ///
+    /// FNV-1a over [`Machine::framebuffer`], so **motion objects are inside the
+    /// hash**. They have to be: a hash that ignored half the picture would let
+    /// the sprite model be wrong without any comparison noticing.
     pub fn frame_hash(&self) -> u64 {
         crate::video::fnv1a(&self.framebuffer())
     }
@@ -543,7 +587,12 @@ mod tests {
         let line = 0x40 - crate::video::VSCROLL_FLOOR as usize;
         let index = line * WIDTH + 16;
 
-        assert_eq!(m.framebuffer()[index], 5, "the pixel we planted");
+        // Nibble 5 with no object over it is colour RAM address 16 + 5.
+        assert_eq!(
+            m.framebuffer()[index],
+            (crate::video::BITMAP_CRAM_BASE + 5) as u8,
+            "the pixel we planted"
+        );
         let writers = m.pixel_writers().expect("log enabled");
         assert_eq!(writers[index], Some(PLANT_STORE_PC));
         assert_eq!(
@@ -883,5 +932,83 @@ mod tests {
         // 8d first, 8b second -- the order romset.rs slices 372BR.RS4.
         assert_eq!(m.mob_rom[0], 0xA5);
         assert_eq!(m.mob_rom[0x2000], 0x5A);
+    }
+
+    /// Motion objects reach the picture, and the arbitration decides.
+    ///
+    /// Synthetic ROMs and a hand-built table: nothing game-derived.
+    #[test]
+    fn a_planted_sprite_is_composited_through_the_arbitration() {
+        use crate::motion::{DISPLAY_DELAY_LINES, OBJECT_BYTES};
+
+        let mut m = Machine::new();
+
+        // A picture ROM that is transparent everywhere except picture 1, row 0,
+        // half 0, whose four pixels are colours 2, 7, 2, 2.
+        let mut rom = vec![0u8; 0x4000];
+        for a in 0..0x2000 {
+            rom[a] = 0x0F;
+            rom[0x2000 + a] = 0xFF;
+        }
+        let addr = 1usize << 5; // picture 1, row 0, half 0
+        // Four pixels, MSB-first: colour 2, then 7 (transparent), then 2, 2.
+        // Encoded rather than hand-computed, because working the plane bits out
+        // by hand is exactly how you plant the wrong colour and then debug the
+        // renderer for it.
+        let (mut p3, mut p2, mut p1) = (0u8, 0u8, 0u8);
+        for (i, mv) in [2u8, 7, 2, 2].into_iter().enumerate() {
+            let b = 3 - i as u8;
+            p3 |= ((mv >> 2) & 1) << b;
+            p2 |= ((mv >> 1) & 1) << b;
+            p1 |= (mv & 1) << b;
+        }
+        rom[addr] = p3;
+        rom[0x2000 + addr] = (p2 << 4) | p1;
+        m.load_motion_roms(&rom).expect("motion roms");
+
+        // Put the object on the first visible line. The buffer is filled a
+        // line early, so an object visible on picture row 0 is evaluated at
+        // FIRST_VISIBLE_LINE - DISPLAY_DELAY_LINES.
+        let vc = (crate::frame::FIRST_VISIBLE_LINE - DISPLAY_DELAY_LINES as u32) as u8;
+        let e = 0xE00; // MT.BSL clear
+        m.sram[e] = 1; // picture
+        m.sram[e + 1] = 0xF0u8.wrapping_sub(vc); // sum lands on 0xF0: row 0
+        m.sram[e + 2] = 0x00; // MPI clear
+        m.sram[e + 3] = 60; // x
+        let _ = OBJECT_BYTES;
+
+        let fb = m.framebuffer();
+        // MPI clear, so the object wins: address {0, 0, mv} = mv.
+        assert_eq!(fb[60], 2, "sprite pixel should win over the bitmap");
+        assert_eq!(fb[62], 2);
+        // The transparent pixel leaves the bitmap showing.
+        assert_eq!(
+            fb[61],
+            crate::video::BITMAP_CRAM_BASE as u8,
+            "colour 7 is transparent"
+        );
+        // And somewhere with no object at all is plain bitmap.
+        assert_eq!(fb[200], crate::video::BITMAP_CRAM_BASE as u8);
+
+        // Moving the sprite changes the hash, which is the whole point of
+        // compositing before hashing.
+        let before = m.frame_hash();
+        m.sram[e + 3] = 61;
+        assert_ne!(m.frame_hash(), before, "a sprite that moves must be visible");
+    }
+
+    /// Without picture ROMs the picture is exactly what it always was, one
+    /// constant offset aside.
+    #[test]
+    fn no_motion_roms_means_the_old_contract() {
+        let mut m = Machine::new();
+        m.ram[0x2000] = 0x35; // two bitmap pixels, nibbles 5 and 3
+        assert!(!m.motion_roms_loaded);
+        let fb = m.framebuffer();
+        let bitmap = m.video.framebuffer(&m.ram[..]);
+        assert!(fb
+            .iter()
+            .zip(&bitmap)
+            .all(|(&a, &b)| a as usize == crate::video::BITMAP_CRAM_BASE + b as usize));
     }
 }

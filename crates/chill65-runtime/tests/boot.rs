@@ -20,7 +20,7 @@ mod common;
 
 use chill65_runtime::{frame::run_frame, Bus, Cpu, Machine};
 
-use common::{build_images, corpus, DATA_LEN, PROG_LEN};
+use common::{build_images, corpus, motion_rom_image, DATA_LEN, PROG_LEN};
 
 /// How many frames to run.
 ///
@@ -63,6 +63,8 @@ fn the_real_roms_boot_and_run() {
     let (prog, data) = build_images(&corpus);
     let mut m = Machine::new();
     m.load_roms(&prog, &data).expect("load");
+    m.load_motion_roms(&motion_rom_image(&corpus))
+        .expect("motion roms");
 
     // --- Vectors -----------------------------------------------------------
     let vector = |m: &mut Machine, a: u16| m.read_u16(a);
@@ -119,7 +121,12 @@ fn the_real_roms_boot_and_run() {
         }
     }
 
-    let lit = m.framebuffer().iter().filter(|&&p| p != 0).count();
+    // Background is colour RAM entry 16 now, not index 0.
+    let lit = m
+        .framebuffer()
+        .iter()
+        .filter(|&&p| p != chill65_runtime::video::BITMAP_CRAM_BASE as u8)
+        .count();
     eprintln!(
         "booted: {SMOKE_FRAMES} frames, {} cycles, {irqs} interrupts taken\n\
          \x20 first draw: frame {first_draw:?}, first interrupt: frame {first_irq:?}\n\

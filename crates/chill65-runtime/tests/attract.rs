@@ -36,9 +36,11 @@ struct Outcome {
     bank_switches: u64,
 }
 
-fn run_attract(prog: &[u8], data: &[u8], frames: u32) -> Outcome {
+fn run_attract(prog: &[u8], data: &[u8], mob: &[u8], frames: u32) -> Outcome {
     let mut m = Machine::new();
     m.load_roms(prog, data).expect("load");
+    // Motion objects are part of the picture, so they are part of the hash.
+    m.load_motion_roms(mob).expect("motion roms");
     let mut cpu = Cpu::new();
     cpu.reset(&mut m);
 
@@ -51,7 +53,11 @@ fn run_attract(prog: &[u8], data: &[u8], frames: u32) -> Outcome {
     let picture = m.framebuffer();
     Outcome {
         hash: m.frame_hash(),
-        lit: picture.iter().filter(|&&p| p != 0).count(),
+        // Background is colour RAM entry 16 now, not index 0.
+        lit: picture
+            .iter()
+            .filter(|&&p| p != chill65_runtime::video::BITMAP_CRAM_BASE as u8)
+            .count(),
         cycles: m.cycles,
         watchdog_expired: m.watchdog_expired,
         watchdog_strobes: m.watchdog_strobes,
@@ -67,8 +73,9 @@ fn attract_mode_runs_draws_and_is_deterministic() {
         return;
     };
     let (prog, data) = common::build_images(&corpus);
+    let mob = common::motion_rom_image(&corpus);
 
-    let first = run_attract(&prog, &data, FRAMES);
+    let first = run_attract(&prog, &data, &mob, FRAMES);
     eprintln!(
         "attract: {FRAMES} frames, {} cycles, hash {:016x}\n\
          \x20 {} lit pixels, {} watchdog strobes, {} bank switches",
@@ -89,7 +96,7 @@ fn attract_mode_runs_draws_and_is_deterministic() {
     );
 
     // The assertion this test exists for.
-    let second = run_attract(&prog, &data, FRAMES);
+    let second = run_attract(&prog, &data, &mob, FRAMES);
     assert_eq!(
         first.hash, second.hash,
         "two independent runs produced different pictures ({:016x} vs {:016x}) — \
@@ -102,7 +109,7 @@ fn attract_mode_runs_draws_and_is_deterministic() {
 
     // A shorter run must differ, or the "identical" result above would be
     // vacuous — it would pass just as well on a machine that never changed.
-    let shorter = run_attract(&prog, &data, FRAMES / 2);
+    let shorter = run_attract(&prog, &data, &mob, FRAMES / 2);
     assert_ne!(
         first.hash, shorter.hash,
         "300 and 600 frames give the same picture, so the equality above proves \
