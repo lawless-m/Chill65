@@ -121,6 +121,26 @@ int main(int argc, char** argv) {
     FILE* cycles_out = fopen(cycles_path, "w");
     if (!cycles_out) { fprintf(stderr, "cannot open %s\n", cycles_path); return 2; }
 
+    // The core's audio: `output [7:0] SOUT` on the top level (CCastles.v:25),
+    // the sum of both POKEYs' outputs from the AudioOutput instance at :298.
+    //
+    // Sampled once per CPU cycle -- every eighth master clock, the same
+    // division `Clock.v` makes for ce2H and the same one the .cycles sidecar
+    // documents. SOUT only changes on that enable, so ANY fixed phase within
+    // the eight yields the true sequence; the phase chosen here is master_ticks
+    // % 8 == 0, and a comparison against it needs to allow a small constant
+    // offset rather than assume a shared origin.
+    //
+    // Written from the first tick after reset is released, NOT from the first
+    // captured frame: the sequence is what matters and its origin is
+    // established by alignment, not by construction.
+    char audio_path[512];
+    snprintf(audio_path, sizeof(audio_path), "%s.audio", out_path);
+    FILE* audio_out = fopen(audio_path, "wb");
+    if (!audio_out) { fprintf(stderr, "cannot open %s\n", audio_path); return 2; }
+    std::vector<unsigned char> audio;
+    audio.reserve(1 << 20);
+
     std::vector<unsigned char> frame(WIDTH * HEIGHT * 3, 0);
     int captured = 0;
     int y = -1;            // active line within the frame
@@ -186,6 +206,11 @@ int main(int argc, char** argv) {
     for (long long t = 0; t < max_ticks && captured < want_frames; t++) {
         tick();
 
+        // One sample per CPU cycle, at a fixed phase within the eight.
+        if (master_ticks % 8 == 0) {
+            audio.push_back((unsigned char)dut->SOUT);
+        }
+
         int vsync = dut->VSYNC;
         int hblank = dut->HBLANK;
         int vblank = dut->VBLANK;
@@ -230,6 +255,8 @@ int main(int argc, char** argv) {
 
     fclose(out);
     fclose(cycles_out);
+    fwrite(audio.data(), 1, audio.size(), audio_out);
+    fclose(audio_out);
 
     char dims[512];
     snprintf(dims, sizeof(dims), "%s.dims", out_path);
@@ -239,8 +266,8 @@ int main(int argc, char** argv) {
         fclose(df);
     }
 
-    fprintf(stderr, "mistersim: %d frames, widest active line %d pixels\n",
-            captured, emitted_max);
+    fprintf(stderr, "mistersim: %d frames, widest active line %d pixels, %zu audio samples\n",
+            captured, emitted_max, audio.size());
     delete dut;
     return captured == want_frames ? 0 : 1;
 }

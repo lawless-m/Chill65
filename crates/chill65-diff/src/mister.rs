@@ -56,6 +56,15 @@ pub struct Capture {
     pub cycles: Vec<u64>,
     /// Pixels per line the core actually emitted — 252 for this core.
     pub emitted: usize,
+    /// The core's `SOUT` audio output, one 8-bit sample per CPU cycle, from
+    /// the first tick after reset is released.
+    ///
+    /// **The origin is not shared with anything.** The simulation starts
+    /// sampling when it releases reset; our runtime starts counting at its own
+    /// reset. So a comparison has to establish the constant lag between the two
+    /// sequences rather than assume they begin together — the same problem the
+    /// frame stamps have, and solved the same way.
+    pub audio: Vec<u8>,
 }
 
 /// Is verilator available?
@@ -238,6 +247,16 @@ pub fn capture_blob(roms: &Path, trace: &Trace, frames: u32) -> Result<Capture, 
         ));
     }
 
+    // The audio sidecar: raw bytes, one per CPU cycle. Absent or empty is an
+    // error rather than silence — a caller asking for audio and getting none
+    // would otherwise compare against a sequence that never existed.
+    let audio_path = dir.join("frames.raw.audio");
+    let audio = std::fs::read(&audio_path)
+        .map_err(|e| format!("{}: {e}", audio_path.display()))?;
+    if audio.is_empty() {
+        return Err(format!("{}: no audio samples", audio_path.display()));
+    }
+
     Ok(Capture {
         frames: blob
             .chunks_exact(stride)
@@ -246,6 +265,7 @@ pub fn capture_blob(roms: &Path, trace: &Trace, frames: u32) -> Result<Capture, 
             .collect(),
         cycles: ticks.iter().map(|t| t / 8).collect(),
         emitted,
+        audio,
     })
 }
 
