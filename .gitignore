@@ -9,6 +9,7 @@
 /atari-coin-op-assembler/
 /AT6502/
 /6502_65C02_functional_tests/
+/roms/
 .devlog/
 
 # Session and build clutter — not part of the toolchain.
