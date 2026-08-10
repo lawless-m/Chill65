@@ -48,6 +48,8 @@ const REQUIRED = [
   'fb_height',
   'mob_ptr',
   'mob_len',
+  'earom_ptr',
+  'earom_len',
 ];
 
 const path = process.argv[2] ?? DEFAULT_WASM;
@@ -72,6 +74,7 @@ for (const name of REQUIRED) {
 assert.equal(wasm.prog_len(), 24576, 'program image size');
 assert.equal(wasm.data_len(), 16384, 'castle data image size');
 assert.equal(wasm.mob_len(), 16384, 'motion-object picture ROM size');
+assert.equal(wasm.earom_len(), 256, 'EAROM size');
 
 // Views into linear memory are invalidated whenever it grows, and the module
 // allocates — so a view is derived immediately before use and never kept.

@@ -112,6 +112,26 @@ pub extern "C" fn mob_len() -> u32 {
     MOB_LEN as u32
 }
 
+/// The EAROM — 256 bytes of non-volatile RAM at `9000-93FF`, where the board
+/// kept its high-score table across power cycles.
+///
+/// `chill65-runtime` models it as **RAM**: the store and recall strobes are
+/// accepted and reads work, so the table lives for as long as the machine does,
+/// and then does not. Persistence is not the runtime's business — it has no
+/// storage and, on `wasm32`, no filesystem to have one in. So the bytes are
+/// exposed here and the embedder decides where they live. The browser page puts
+/// them in `localStorage`, which is the closest thing it has to a part that
+/// survives being switched off.
+#[no_mangle]
+pub extern "C" fn earom_ptr() -> *mut u8 {
+    state().machine.earom.as_mut_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn earom_len() -> u32 {
+    0x100
+}
+
 #[no_mangle]
 pub extern "C" fn prog_len() -> u32 {
     PROG_LEN as u32

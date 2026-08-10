@@ -80,6 +80,32 @@ const KEYS = {
   KeyS: SWITCH.Slam,
 };
 
+// The EAROM is where the board kept its high scores. The runtime models it as
+// RAM — it has no storage, and on wasm32 no filesystem to have one in — so
+// surviving a reload is this page's job. Saved on a timer rather than every
+// frame: 256 bytes through localStorage sixty times a second would be silly,
+// and the game writes the table rarely.
+const EAROM_KEY = 'chill65.earom';
+const EAROM_SAVE_MS = 2000;
+
+/// Read the saved table, or null if there is none or it is the wrong size.
+function loadEarom(want) {
+  const text = localStorage.getItem(EAROM_KEY);
+  if (!text) return null;
+  try {
+    const raw = atob(text);
+    if (raw.length !== want) return null;
+    return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+  } catch {
+    // Corrupt or from an older build: start fresh rather than refuse to boot.
+    return null;
+  }
+}
+
+function saveEarom(bytes) {
+  localStorage.setItem(EAROM_KEY, btoa(String.fromCharCode(...bytes)));
+}
+
 const canvas = document.getElementById('screen');
 const status = document.getElementById('status');
 const context = canvas.getContext('2d');
@@ -126,6 +152,14 @@ async function main() {
   // characters do not.
   view(wasm, wasm.mob_ptr(), mob.length).set(mob);
   if (wasm.boot() !== 0) throw new Error('the module refused the images');
+
+  // After boot, because boot builds a fresh machine and would wipe it.
+  const saved = loadEarom(wasm.earom_len());
+  if (saved) {
+    view(wasm, wasm.earom_ptr(), saved.length).set(saved);
+  }
+  let lastEarom = Array.from(view(wasm, wasm.earom_ptr(), wasm.earom_len()));
+  let nextSave = 0;
 
   let dispatch = true;
   wasm.set_dispatch(1);
@@ -216,6 +250,16 @@ async function main() {
     const ptr = wasm.render_rgba();
     picture.data.set(view(wasm, ptr, picture.data.length));
     context.putImageData(picture, 0, 0);
+
+    // Persist the high-score table when it changes, and not otherwise.
+    if (now >= nextSave) {
+      nextSave = now + EAROM_SAVE_MS;
+      const current = view(wasm, wasm.earom_ptr(), wasm.earom_len());
+      if (current.some((b, i) => b !== lastEarom[i])) {
+        lastEarom = Array.from(current);
+        saveEarom(lastEarom);
+      }
+    }
 
     if (now - secondStarted >= 1000) {
       shown = Math.round((framesThisSecond * 1000) / (now - secondStarted));
