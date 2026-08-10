@@ -184,6 +184,37 @@ See `atari-recompiler-plan.md` for the full plan, and:
 | `hardware.md` §13 | Motion objects as modelled, and verified against the core to zero differing pixels |
 | `LOOP.md` | Working scope and stop conditions |
 
+## Licence, and where the hardware models came from
+
+MIT — see `LICENSE`. That covers the original work, which is nearly all of it:
+the assembler, the emitter, the differential harness, the WebAssembly ABI and
+browser front end, the recorded traces, the fixture programs and the
+documentation.
+
+Two things are worth stating plainly rather than leaving for someone to
+discover.
+
+**The hardware models in `chill65-runtime` were transcribed from
+[Arcade-CrystalCastles_MiSTer](https://github.com/MiSTer-devel/Arcade-CrystalCastles_MiSTer)**,
+which is GPL v2, by Enceladus. Every transcription carries a `file:line`
+citation to the module it came from — the bus decode, video timing, the colour
+arbitration, motion objects, the clock chain. What those files describe is
+Atari's 1983 silicon, and how a circuit behaves is not itself copyrightable, so
+the position taken here is that these are independent descriptions of the same
+hardware rather than derivatives of the Verilog. That is a judgement, and it is
+recorded here so anyone forming a different one can see exactly what was done
+and where.
+
+**`rtl/Pokey/` in that repository is *not* under the same terms.** Those files
+are © 2013 Mark Watson, licensed for non-commercial use only, and the notice
+extends to derived works. The POKEY audio path here is therefore written from
+published documentation of the chip and **not** transcribed from those files.
+The verilated core is still used as an *oracle* — the model's output is compared
+against the core's, which observes behaviour rather than copying expression.
+
+The core is used unmodified in every case, and nothing from it is redistributed
+here.
+
 ## You must supply your own game source
 
 This repository contains **no game code and no ROMs**, and never will. The
