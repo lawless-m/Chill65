@@ -196,6 +196,9 @@ fn replay(
 ) -> Result<(), String> {
     let mut machine = Machine::new();
     machine.load_roms(&images.prog, &images.data)?;
+    // Both dispatch modes must run the same machine, or the identity check
+    // compares two different things and fails for the wrong reason.
+    machine.load_motion_roms(&images.mob)?;
     let mut cpu = Cpu::new();
     cpu.reset(&mut machine);
 

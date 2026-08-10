@@ -17,7 +17,7 @@
 //! So the harness hashes the canonical RGB instead, with the same FNV-1a the
 //! runtime already uses.
 
-use chill65_runtime::video::{cram_rgb, fnv1a, BITMAP_CRAM_BASE, HEIGHT, WIDTH};
+use chill65_runtime::video::{cram_rgb, fnv1a, HEIGHT, WIDTH};
 
 use crate::trace::Trace;
 
@@ -119,6 +119,7 @@ pub trait Reference {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chill65_runtime::video::BITMAP_CRAM_BASE;
 
     /// Colour RAM where entry `BITMAP_CRAM_BASE + i` is distinguishable.
     fn ramp_cram() -> [u16; 32] {

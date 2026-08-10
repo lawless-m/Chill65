@@ -46,6 +46,8 @@ const REQUIRED = [
   'render_rgba',
   'fb_width',
   'fb_height',
+  'mob_ptr',
+  'mob_len',
 ];
 
 const path = process.argv[2] ?? DEFAULT_WASM;
@@ -69,6 +71,7 @@ for (const name of REQUIRED) {
 
 assert.equal(wasm.prog_len(), 24576, 'program image size');
 assert.equal(wasm.data_len(), 16384, 'castle data image size');
+assert.equal(wasm.mob_len(), 16384, 'motion-object picture ROM size');
 
 // Views into linear memory are invalidated whenever it grows, and the module
 // allocates — so a view is derived immediately before use and never kept.
@@ -81,6 +84,10 @@ assert.equal(wasm.data_len(), 16384, 'castle data image size');
 const view = (ptr, len) => new Uint8Array(wasm.memory.buffer, ptr, len);
 view(wasm.prog_ptr(), wasm.prog_len()).fill(0);
 view(wasm.data_ptr(), wasm.data_len()).fill(0);
+// Left zeroed: an all-zero picture ROM is how the module is told there are
+// none, so this run has no sprites — which is the point, since it proves the
+// machine boots and ticks with nothing undistributable staged at all.
+view(wasm.mob_ptr(), wasm.mob_len()).fill(0);
 
 assert.equal(wasm.boot(), 0, 'boot rejected the staged images');
 for (let frame = 0; frame < FRAMES; frame++) {

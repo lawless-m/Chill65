@@ -72,22 +72,30 @@ async function fetchBytes(name) {
 async function main() {
   // The module needs no imports at all, which is what a hand-written C ABI
   // buys: nothing here has to be kept in step with the Rust.
-  const [{ instance }, prog, data] = await Promise.all([
+  const [{ instance }, prog, data, mob] = await Promise.all([
     WebAssembly.instantiateStreaming(fetch('chill65.wasm'), {}),
     fetchBytes('prog.bin'),
     fetchBytes('data.bin'),
+    fetchBytes('mob.bin'),
   ]);
   const wasm = instance.exports;
 
-  if (prog.length !== wasm.prog_len() || data.length !== wasm.data_len()) {
+  if (
+    prog.length !== wasm.prog_len() ||
+    data.length !== wasm.data_len() ||
+    mob.length !== wasm.mob_len()
+  ) {
     throw new Error(
-      `image sizes are ${prog.length}/${data.length}, ` +
-      `the module wants ${wasm.prog_len()}/${wasm.data_len()}`,
+      `image sizes are ${prog.length}/${data.length}/${mob.length}, ` +
+      `the module wants ${wasm.prog_len()}/${wasm.data_len()}/${wasm.mob_len()}`,
     );
   }
 
   view(wasm, wasm.prog_ptr(), prog.length).set(prog);
   view(wasm, wasm.data_ptr(), data.length).set(data);
+  // The motion-object picture ROMs: without these the castle draws and the
+  // characters do not.
+  view(wasm, wasm.mob_ptr(), mob.length).set(mob);
   if (wasm.boot() !== 0) throw new Error('the module refused the images');
 
   let dispatch = true;

@@ -126,10 +126,17 @@ pub fn build_images(corpus: &Path) -> Result<Images, String> {
         return Err(format!("data image is {} bytes, want {DATA_LEN}", data.len()));
     }
 
+    // Written beside the other two: `tools/stage-web.sh` and the Node harness
+    // read the images from here, and a third one they cannot find is a third
+    // one the browser build renders without.
+    let mob = motion_rom_image(corpus)?;
+    let mob_path = out_dir.join("mob.bin");
+    std::fs::write(&mob_path, &mob).map_err(|e| format!("{}: {e}", mob_path.display()))?;
+
     Ok(Images {
         prog,
         data,
-        mob: motion_rom_image(corpus)?,
+        mob,
         sym: sym_path,
     })
 }

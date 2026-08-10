@@ -15,6 +15,7 @@
 #   index.html, app.js   ours, committed
 #   chill65.wasm         built from the game source — game-derived
 #   prog.bin, data.bin   the ROM images — game-derived
+#   mob.bin              the motion-object picture ROMs — game-derived
 #
 # Nothing here may be copied outside target/ or committed. Build the inputs
 # first, both with the corpus set:
@@ -32,6 +33,7 @@ out="$root/target/web"
 wasm="$root/target/wasm32-unknown-unknown/release/chill65_wasm.wasm"
 prog="$root/target/boot-artefacts/prog.bin"
 data="$root/target/boot-artefacts/data.bin"
+mob="$root/target/boot-artefacts/mob.bin"
 
 need() {
     if [ ! -f "$1" ]; then
@@ -46,6 +48,7 @@ need "$root/web/app.js" "this repository is incomplete"
 need "$wasm" "cargo build -p chill65-wasm --target wasm32-unknown-unknown --release"
 need "$prog" "cargo run -p chill65-native --bin ccnative -- hashes --trace traces/idle-attract.trace"
 need "$data" "cargo run -p chill65-native --bin ccnative -- hashes --trace traces/idle-attract.trace"
+need "$mob" "cargo run -p chill65-native --bin ccnative -- hashes --trace traces/idle-attract.trace"
 
 mkdir -p "$out"
 cp "$root/web/index.html" "$out/index.html"
@@ -53,6 +56,7 @@ cp "$root/web/app.js" "$out/app.js"
 cp "$wasm" "$out/chill65.wasm"
 cp "$prog" "$out/prog.bin"
 cp "$data" "$out/data.bin"
+cp "$mob" "$out/mob.bin"
 
 echo "staged into $out"
 ls -l "$out"

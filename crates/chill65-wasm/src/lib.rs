@@ -33,17 +33,20 @@
 // without colliding with the runtime's own.
 use chill65_native::Registry;
 use chill65_runtime::frame;
-use chill65_runtime::video::{cram_rgb, BITMAP_CRAM_BASE, HEIGHT, WIDTH};
+use chill65_runtime::video::{cram_rgb, HEIGHT, WIDTH};
 use chill65_runtime::{Cpu, Machine, Switch};
 
 const PROG_LEN: usize = 24576;
 const DATA_LEN: usize = 16384;
+/// The motion-object picture ROMs: 136022-106.8d then 136022-107.8b.
+const MOB_LEN: usize = 16384;
 const RGBA_LEN: usize = WIDTH * HEIGHT * 4;
 
 /// Everything that survives between calls.
 struct State {
     prog: [u8; PROG_LEN],
     data: [u8; DATA_LEN],
+    mob: [u8; MOB_LEN],
     rgba: [u8; RGBA_LEN],
     machine: Machine,
     cpu: Cpu,
@@ -68,6 +71,7 @@ fn state() -> &'static mut State {
             STATE = Some(State {
                 prog: [0; PROG_LEN],
                 data: [0; DATA_LEN],
+                mob: [0; MOB_LEN],
                 rgba: [0; RGBA_LEN],
                 machine: Machine::new(),
                 cpu: Cpu::new(),
@@ -89,6 +93,23 @@ pub extern "C" fn prog_ptr() -> *mut u8 {
 #[no_mangle]
 pub extern "C" fn data_ptr() -> *mut u8 {
     state().data.as_mut_ptr()
+}
+
+/// Where JavaScript writes the 16384-byte motion-object picture ROMs.
+///
+/// Optional in one specific sense: an **all-zero** staging buffer is treated as
+/// "not supplied" and the machine runs without sprites. That is what lets the
+/// corpus-free host test — which stages the committed fixture program and
+/// nothing else — keep working, and an all-zero picture ROM would draw nothing
+/// anyway, since colour 0 is opaque black rather than transparent.
+#[no_mangle]
+pub extern "C" fn mob_ptr() -> *mut u8 {
+    state().mob.as_mut_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn mob_len() -> u32 {
+    MOB_LEN as u32
 }
 
 #[no_mangle]
@@ -114,6 +135,11 @@ pub extern "C" fn boot() -> u32 {
     let prog = s.prog;
     let data = s.data;
     if machine.load_roms(&prog, &data).is_err() {
+        return 1;
+    }
+    // All zeros means nobody staged them; see `mob_ptr`.
+    let mob = s.mob;
+    if mob.iter().any(|&b| b != 0) && machine.load_motion_roms(&mob).is_err() {
         return 1;
     }
     let mut cpu = Cpu::new();
@@ -177,10 +203,11 @@ pub extern "C" fn run_frame() -> u32 {
     u32::from(result.is_err())
 }
 
-/// The frame hash — palette indices, not colours.
+/// The frame hash — colour RAM addresses, not colours.
 ///
 /// This is the number the native build's `ccnative hashes` prints, and the one
-/// the two targets are compared on. It reaches JavaScript as a `BigInt`.
+/// the two targets are compared on — now over colour RAM addresses, so motion
+/// objects are inside it. It reaches JavaScript as a `BigInt`.
 #[no_mangle]
 pub extern "C" fn frame_hash() -> u64 {
     state().machine.frame_hash()
@@ -205,14 +232,17 @@ pub extern "C" fn fb_height() -> u32 {
 ///
 /// Colour RAM is applied exactly as `ccrun`'s `write_ppm` does — the same
 /// entry, the same `cram_rgb` — so the picture in a browser is the picture in a
-/// PPM, with an alpha byte added.
+/// PPM, with an alpha byte added. `Machine::framebuffer` already arbitrated
+/// bitmap against motion objects, so the byte *is* the colour RAM address and
+/// `BITMAP_CRAM_BASE` must not be added again.
 #[no_mangle]
 pub extern "C" fn render_rgba() -> *const u8 {
     let s = state();
     let picture = s.machine.framebuffer();
     let cram = &s.machine.video.cram;
     for (out, &pixel) in s.rgba.chunks_exact_mut(4).zip(picture.iter()) {
-        let entry = cram[(BITMAP_CRAM_BASE + pixel as usize) & 0x1F];
+        // The framebuffer already carries the arbitrated colour RAM address.
+        let entry = cram[pixel as usize & 0x1F];
         let (r, g, b) = cram_rgb(entry);
         out.copy_from_slice(&[r, g, b, 255]);
     }
