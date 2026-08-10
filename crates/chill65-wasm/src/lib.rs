@@ -130,9 +130,13 @@ pub extern "C" fn set_dispatch(on: u32) {
     state().dispatch = on != 0;
 }
 
-/// How many routines the module was built with. Zero without a corpus.
+/// Addresses the dispatch can enter compiled code at. Zero without a corpus.
+///
+/// Not a routine count: a state-machine routine registers **every block** as an
+/// entry, so that the dispatch can resume it rather than only start it. Twenty
+/// or so routines come to a few hundred entries.
 #[no_mangle]
-pub extern "C" fn compiled_routines() -> u32 {
+pub extern "C" fn dispatch_entries() -> u32 {
     state().registry.len() as u32
 }
 
