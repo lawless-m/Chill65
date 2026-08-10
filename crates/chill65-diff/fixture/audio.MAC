@@ -1,0 +1,128 @@
+; A POKEY audio fixture.
+;
+; ORIGINAL WORK. Nothing here comes from the game source, and it is committable
+; for the same reason `mob.MAC` is: it is a program we wrote, exercising
+; hardware we modelled.
+;
+; # Why it exists
+;
+; The audio path was built by measuring the verilated core one behaviour at a
+; time — the polynomials, the clock divisors, the distortion table. Each of
+; those measurements looked at one signal in isolation. This programme runs the
+; whole path at once and lets the two implementations be compared sample for
+; sample, which is a different and stronger question: not "is each part right"
+; but "do they together produce the same sound".
+;
+; # What it programs
+;
+; Both chips, so the board's `SOUT = snd1 + snd2` summation is exercised rather
+; than assumed:
+;
+;   POKEY0 channel 1   pure tone, AUDF 5, volume 7
+;   POKEY0 channel 2   volume-only, level 3 — a DC offset that must appear on
+;                      every sample, so a channel silently dropping out shows
+;   POKEY1 channel 1   pure tone, AUDF 11, volume 5
+;
+; The two tones are at different frequencies deliberately: summed, they beat,
+; and the beat pattern is far more discriminating than either tone alone. A
+; divider off by one would keep both tones square and still destroy the beat.
+;
+; # What it deliberately leaves out
+;
+; No channel selects a polynomial distortion. The polynomials themselves were
+; measured and are tested against those measurements, but their *phase at
+; reset* is not established — the fixtures that identified them idled for tens
+; of thousands of cycles first, so they read the sequence and not its origin.
+; Including one here would compare our arbitrary starting phase against the
+; core's real one and fail for a reason that has nothing to do with the audio
+; path. What that needs is its own measurement, and it is better to have a gate
+; that is exact about less than one that is approximate about more.
+
+	.=0E000
+
+; ---------------------------------------------------------------- entry
+START::	SEI
+	CLD
+	LDX I,0FF
+	TXS
+
+; The OUT1 latch, one bit per address, sampling D3. Zero everything: nothing
+; here depends on it, but leaving it undefined would leave the two sides free
+; to differ somewhere that is not the audio path.
+	LDA I,00
+	STA 09F00
+	STA 09F01
+	STA 09F02
+	STA 09F03
+	STA 09F04
+	STA 09F05
+	STA 09F06
+	STA 09F07
+
+; ------------------------------------------------------ both chips to zero
+; All sixteen registers of each, so neither starts from whatever the hardware
+; happened to power up holding.
+	LDA I,00
+	LDX I,00
+ZERO:	STA AX,09800
+	STA AX,09A00
+	INX
+	CPX I,010
+	BNE ZERO
+
+; Release init. `pokey.v:709` holds the polynomial counters in reset while both
+; low bits of SKCTL are clear, which is the state from power-on; the game's
+; CST.MAC:18-19 writes 7 to both chips, and so does this.
+	LDA I,07
+	STA 0980F
+	STA 09A0F
+
+; ------------------------------------------------------------- POKEY0
+; Channel 1: pure tone. AUDC bits 7:5 = 101 selects the tone with poly5 out of
+; circuit; bits 3:0 are the volume.
+	LDA I,05
+	STA 09800
+	LDA I,0A7
+	STA 09801
+
+; Channel 2: volume-only. AUDC bit 4 emits the level continuously and ignores
+; the output flip-flop, so this is a constant 3 on every sample.
+	LDA I,00
+	STA 09802
+	LDA I,013
+	STA 09803
+
+; ------------------------------------------------------------- POKEY1
+; Channel 1: a second pure tone, at a different frequency, so the two chips'
+; outputs beat against each other in the sum.
+	LDA I,0B
+	STA 09A00
+	LDA I,0A5
+	STA 09A01
+
+; ------------------------------------------------------------ synchronise
+; STIMER reloads every divider and clears the output flip-flops, so both chips
+; start from a defined phase rather than from wherever the register writes left
+; them. Its value is immaterial; the write is the strobe.
+	STA 09809
+	STA 09A09
+
+; ------------------------------------------------------------------ idle
+; Nothing further touches either chip. The watchdog is strobed so the machine
+; stays alive; a board that stopped being petted would reset and the sound
+; would restart mid-comparison.
+IDLE::	STA 09E00
+	JMP IDLE
+
+; ------------------------------------------------------------- interrupts
+; Not taken — I is set at entry and never cleared — but the handler exists and
+; is correct, so that a change which does enable interrupts fails loudly rather
+; than wedging: acknowledge the interrupt, pet the watchdog, return.
+ISR::	STA 09D80
+	STA 09E00
+	RTI
+
+	.=0FFFA
+	.WORD START
+	.WORD START
+	.WORD ISR

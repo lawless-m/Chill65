@@ -525,11 +525,20 @@ impl Audio {
         (0..4).map(|ch| self.level(ch, regs)).sum()
     }
 
-    /// `STIMER`: reload every divider and clear the output flip-flops, so the
-    /// channels restart in a known phase together. This is the documented
-    /// purpose of the register — software writes it after setting frequencies to
-    /// stop the channels beating against each other.
+    /// `STIMER`: restart the whole divider chain and clear the output
+    /// flip-flops, so the channels resume from a known phase together. This is
+    /// the documented purpose of the register — software writes it after setting
+    /// frequencies to stop the channels beating against each other.
+    ///
+    /// **The base-clock prescaler restarts too**, which is measured rather than
+    /// assumed. The fixture in `chill65-diff` strobes STIMER on one chip and
+    /// then the other, four cycles apart — one `STA` — and the core's output
+    /// puts the two chips' first edges exactly those four cycles apart. If the
+    /// prescaler ran free the two chips would share the 28-cycle grid and both
+    /// would fire on the same tick regardless of when they were strobed, which
+    /// is not what the hardware does.
     pub fn stimer(&mut self, regs: &[u8; 16]) {
+        self.base = 0;
         let audctl = regs[reg::AUDCTL];
         let fast = [audctl & 0x40 != 0, false, audctl & 0x20 != 0, false];
         let join = [audctl & 0x10 != 0, audctl & 0x08 != 0];
@@ -544,7 +553,13 @@ impl Audio {
                 }
             }
         }
-        self.out = [false; 4];
+        // **Set, not cleared** — measured. With the flip-flops cleared here,
+        // every tone in the `chill65-diff` fixture comes out inverted against
+        // the core: identical periods, identical run lengths, opposite phase by
+        // exactly half a period each. Setting them is the one change that fixes
+        // that, and it cannot instead be a global output inversion — the poly4
+        // sequence was identified from the core's own output and would break.
+        self.out = [true; 4];
         self.hp = [false; 2];
     }
 }
