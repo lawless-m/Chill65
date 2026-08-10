@@ -645,6 +645,11 @@ for anything changing. Nothing in the harness is calibrated against a shared
 timebase, and until something is, "diverged at frame N" should be read as
 "differences begin around frame N".
 
+> **§13 does the calibration.** Every frame is now dated in emulated CPU
+> cycles, and the measured offset is **zero** for both oracles — the numbering
+> was aligned after all. What survives is the content lag, which turns out to be
+> a real difference in our model rather than the artefact this section supposed.
+
 This does not weaken the fault-injection gate, which localises a *routine* from
 a persistent difference in a static picture (§8). It does weaken any inference
 from a small divergence in a frame where something is being drawn.
@@ -678,3 +683,155 @@ lose.
 
 `gate3.md` and `gate4.md` record this divergence as unexplained, which it was
 when they were written.
+
+## 13. The shared timebase
+
+§12 ends by saying nothing in the harness is calibrated against a shared
+timebase. This is that calibration. Every frame, from every implementation, now
+carries the emulated CPU cycle count it was captured at, so the shift between
+two frame numberings is **read off rather than searched for**.
+
+The answer is that there is no shift. §12's suspicion was reasonable and wrong,
+and what it was really seeing survives the correction — see §13.4.
+
+### 13.1 How each side dates a frame
+
+The unit is CPU cycles at 1.25 MHz, 20,480 to a frame. It is the one quantity
+all three can express, and it is *emulated time*, not instructions retired.
+
+**Ours** — `Machine::cycles` read in the per-frame callback (`ours.rs`), which
+runs immediately after `run_frame` returns. Recorded unrounded: a frame ends on
+the first instruction boundary at or past its deadline, so it overshoots by less
+than one instruction and the excess accumulates.
+
+**MAME** — `capture.lua` writes a `<out>.cycles` sidecar, one decimal per
+captured frame, in the same notifier callback that writes the pixels.
+
+MAME 0.276's Lua has **no cycle counter on the CPU device**: `total_cycles()`,
+`cycles_remaining()`, `.clock` and `.clockscale` are all absent, which a probe
+established before any of this was built. What it does have is machine time as
+an attotime, and `as_ticks` converts that to any frequency in exact integer
+arithmetic:
+
+```lua
+manager.machine.time:as_ticks(1250000)
+```
+
+Integers, so it cannot drift across a 2,640-frame trace the way `as_double()`
+would.
+
+**The verilated core** — `sim/main.cpp` counts calls to its `tick()` lambda,
+which is the only thing that advances `clk`; the ROM download toggles `dn_clk`,
+a separate port, and so costs no master clocks. `Clock.v` derives `ce2H`, the
+CPU clock enable, as one eighth of the 10 MHz master, so `mister.rs` divides the
+tick count by eight. That is the same derivation `chill65-runtime`'s `frame.rs`
+uses to reach 20,480 cycles a frame.
+
+A stamp count that does not match the frame count is an **error** on both
+oracles, never a truncation: a short stream would silently misdate every frame
+after the gap, which is the exact fault this campaign exists to remove.
+
+### 13.2 Measured
+
+`cargo test -p chill65-diff --test timebase -- --ignored --nocapture`, over
+`traces/idle-attract.trace`:
+
+```text
+  ours     period 20480..20485 cycles (want 20480)
+  mame     period 20480..20480 cycles (want 20480)
+  mister   period 20480..20480 cycles (want 20480)
+
+  mame     whole frames +0, sub-frame phase +0 cycles
+  mister   whole frames +0, sub-frame phase +336 cycles
+
+  mame     slide over 500 frames: -409 cycles (-0.82/frame)
+  mister   slide over 360 frames: -228 cycles (-0.63/frame)
+```
+
+**The rate is identical on all three**, reached three unrelated ways: our own
+cycle counter, MAME's attotime, and master clocks off a verilated 10 MHz
+oscillator divided by eight. Three implementations with nothing in common
+agreeing on 20,480 is worth more than any one of them asserting it.
+
+**The whole-frame offset is zero for both oracles.** MAME shares our epoch
+exactly. The core starts 336 cycles later — reset hold plus whatever video phase
+it powers up in — which is a sixtieth of a frame and rounds to no shift at all.
+
+**The slow negative slide is ours.** Our frames overshoot their deadline by
+about 0.8 cycles on average and the excess accumulates; the oracles' clocks are
+exact. It is not a difference of rate, and over 500 frames it amounts to a
+fiftieth of a frame. The same overshoot appears in the attract figure the
+runtime has gated since Phase 2: 12,288,528 against 600 × 20,480 = 12,288,000,
+a difference of 528 cycles.
+
+### 13.3 Applied
+
+`localise_external` measures the offset per oracle **from the streams in hand**,
+every run, and applies it through `compare_offset`. Hard-coding what the
+calibration test printed would make a report agree with a past run rather than
+with the run it is reporting on.
+
+```text
+ours vs mame:   diverged at frame 162: MN.ST [CRF.MAC] (2 pixels) [frame offset +0, measured]
+ours vs mister: diverged at frame 162: MN.ST [CRF.MAC] (2 pixels) [frame offset +0, measured]
+```
+
+**The offset is stated even when it is zero.** A measured zero and an
+unexamined assumption of zero produce identical reports if the number is
+omitted, and telling those two apart is the entire point.
+
+Two details in `diverge.rs` that matter more than they look:
+
+- The shift is taken at the **start** of the run, before either side has
+  accumulated any slide.
+- It rounds to the **nearest** frame, not the floor. Flooring calls a difference
+  of −2 cycles "one frame behind, 20,478 cycles into it" — arithmetically true,
+  and it would have applied a whole frame of shift on the strength of two
+  cycles. The first version of the calibration did exactly that.
+
+### 13.4 What the calibration did *not* explain
+
+§12 observed that the oracles' pictures gain content one to two frames after
+ours, and supposed it was a numbering offset. With the clocks now known to agree
+to a fraction of a frame, that reading is dead and the observation stands:
+
+```text
+first frame with >=88 lit:   ours 312, mame 314, mister 313
+first frame with >=176 lit:  ours 335, mame 336, mister 336
+```
+
+**Two independent oracles draw that content after we do.** That is a behavioural
+difference in our model, not an artefact of comparison — and it is now a finding
+rather than a nuisance, because the alternative explanation has been eliminated
+by measurement rather than by argument.
+
+Whether we draw early, or they present late, is not established here.
+
+### 13.5 What remains uncomparable, alignment or no
+
+Aligning clocks does not make a fast-changing picture comparable, and three
+things stay outside what any frame-indexed comparison can say:
+
+- **The RAM-test cursor, frames ~162 to ~208** (§12). A two-pixel marker walks
+  through memory faster than the frame rate; both sides sample it, at different
+  phases, and catch it on different frames. Not fixable by alignment.
+- **Frames an oracle catches mid-draw.** MAME showed 31 of 88 pixels at its
+  frame 313. Our snapshot is all-or-nothing because the frame boundary falls
+  between the writes, so we have no way to represent a half-drawn picture.
+- **Any transient the game writes into bitmap RAM** — §12's general caveat. The
+  RAM test is the loudest case, not the only possible one.
+
+**None of these is gated on, and none may be.** They are reported.
+
+### 13.6 The residual phase, and what is deliberately not done
+
+The core's 336-cycle lead says our snapshot instant and its capture instant sit
+at slightly different points in the video frame. MAME's phase is zero, so ours
+and MAME's coincide.
+
+Moving our snapshot instant to match is **possible future work and explicitly
+not done here.** It would change every frame hash we produce, and the runtime
+has gated on `087e02f4ca003874` at 12,288,528 cycles since Phase 2. Modelling
+scanout properly — which would also remove the mid-draw asymmetry above — is
+larger still and out of scope for this campaign. Both are recorded so that
+whoever wants them can see what they would cost.
