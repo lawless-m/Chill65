@@ -168,3 +168,93 @@ fn the_ir_records_every_symbol_the_assembler_defined() {
     eprintln!("{checked} IR labels agree with the assembler's symbol table");
     assert!(checked > 500, "only {checked} labels cross-checked");
 }
+
+#[test]
+#[ignore = "needs CHILL65_CORPUS pointing at the game source"]
+fn ir_markers_reproduce_the_published_construct_counts() {
+    let Some(corpus) = corpus() else {
+        eprintln!("CHILL65_CORPUS unset — skipping");
+        return;
+    };
+    let (_, ir) = build_program(&corpus);
+
+    use chill65_asm::ir::Marker;
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for (m, _) in ir.markers() {
+        let key = match m {
+            Marker::IfOpen { cond } => format!("IF{cond}"),
+            Marker::Else => "ELSE".to_string(),
+            Marker::IfClose => "ENDIF/THEN".to_string(),
+            Marker::LoopOpen => "BEGIN".to_string(),
+            Marker::LoopClose { cond } => format!("{cond}END"),
+            Marker::LoopContinue { cond } => format!("{cond}CONT"),
+        };
+        *counts.entry(key).or_default() += 1;
+    }
+    let total: usize = counts.values().sum();
+    let mut ranked: Vec<_> = counts.iter().collect();
+    ranked.sort_by_key(|(k, n)| (std::cmp::Reverse(**n), (*k).clone()));
+    eprintln!("constructs: {total} invocations");
+    for (k, n) in ranked.iter().take(10) {
+        eprintln!("  {n:5}  {k}");
+    }
+
+    // codegen-readiness.md's table, reached here from recorded markers rather
+    // than from counting macro invocations as they happen.
+    let at = |k: &str| counts.get(k).copied().unwrap_or(0);
+    assert_eq!(at("ENDIF/THEN"), 466, "ENDIF/THEN");
+    assert_eq!(at("IFEQ"), 198, "IFEQ");
+    assert_eq!(at("IFNE"), 121, "IFNE");
+    assert_eq!(at("ELSE"), 108, "ELSE");
+    assert_eq!(at("BEGIN"), 98, "BEGIN");
+    assert_eq!(at("IFCS"), 60, "IFCS");
+    assert_eq!(at("EQEND"), 54, "EQEND");
+    assert_eq!(at("IFCC"), 40, "IFCC");
+    assert_eq!(at("IFMI"), 26, "IFMI");
+    // codegen-readiness.md reports 1,702, counting every macro invocation --
+    // including a construct expanding into another, as ENDIF does into THEN.
+    // Markers record only the outermost, which is the number of constructs the
+    // source actually contains and the number the emitter must lower.
+    eprintln!("(codegen-readiness.md's 1,702 counts nested expansions too)");
+    assert_eq!(total, 1236, "outermost construct invocations");
+}
+
+#[test]
+#[ignore = "needs CHILL65_CORPUS pointing at the game source"]
+fn the_game_segments_into_routines_with_balanced_constructs() {
+    let Some(corpus) = corpus() else {
+        eprintln!("CHILL65_CORPUS unset — skipping");
+        return;
+    };
+    let (_, ir) = build_program(&corpus);
+
+    let routines = ir.routines();
+    let assigned = ir.instructions().filter(|i| i.routine.is_some()).count();
+    let total = ir.instructions().count();
+    eprintln!(
+        "{} routines; {assigned} of {total} instructions assigned ({:.1}%)",
+        routines.len(),
+        100.0 * assigned as f64 / total as f64
+    );
+    assert!(routines.len() > 100, "only {} routines found", routines.len());
+    assert!(
+        assigned * 100 / total > 90,
+        "only {assigned} of {total} instructions fell inside a routine"
+    );
+
+    // Constructs must balance over the program: every open eventually closed.
+    let mut depth = 0i32;
+    let mut lowest = 0i32;
+    for (m, _) in ir.markers() {
+        if m.opens() {
+            depth += 1;
+        }
+        if m.closes() {
+            depth -= 1;
+        }
+        lowest = lowest.min(depth);
+    }
+    eprintln!("construct nesting: ends at {depth}, lowest {lowest}");
+    assert_eq!(depth, 0, "constructs do not balance across the program");
+    assert_eq!(lowest, 0, "a construct closed before it opened");
+}

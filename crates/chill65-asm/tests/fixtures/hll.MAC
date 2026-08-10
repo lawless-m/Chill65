@@ -1,0 +1,32 @@
+; Minimal structured-control-flow constructs, for testing the IR's markers.
+;
+; ORIGINAL TEST SOURCE. This is not HLL65F and no part of it is copied from the
+; game corpus; it defines macros of the same names so the marker classifier can
+; be exercised without the corpus present. The real package's mechanism -- LOC,
+; FND and the placeholder back-patch -- is deliberately not reproduced here;
+; only the names matter to this test.
+
+	.MACRO IFEQ
+	BNE .+2
+	.ENDM
+
+	.MACRO IFCS
+	BCC .+2
+	.ENDM
+
+	.MACRO ELSE
+	.ENDM
+
+	.MACRO ENDIF
+	.ENDM
+
+	.MACRO BEGIN
+	.ENDM
+
+	.MACRO EQEND
+	BEQ .-2
+	.ENDM
+
+	.MACRO PLCONT
+	BPL .-2
+	.ENDM

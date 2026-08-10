@@ -296,6 +296,7 @@ impl<'a> Assembler<'a> {
             self.flush_ir_data();
             let image = std::mem::take(&mut self.image);
             self.ir.resolve_operands_from(&image);
+            self.ir.segment_routines();
             Ok(image)
         } else {
             Err(std::mem::take(&mut self.errors))
@@ -497,6 +498,28 @@ impl<'a> Assembler<'a> {
             }
         };
         *self.macro_uses.entry(key.clone()).or_insert(0) += 1;
+        if self.pass == 2 {
+            // Structure markers are recorded where the construct is invoked,
+            // which is the only place the structure is visible: after expansion
+            // an IFEQ is an ordinary BNE.
+            // Only the outermost construct is recorded. `ENDIF` expands to
+            // `THEN` (codegen-readiness.md notes they are the same construct),
+            // and `IFEQ` to `IFXX`, so a source-level construct can invoke
+            // another. Recording both would report two closes for one open and
+            // leave the emitter with unbalanced structure.
+            let nested = self
+                .expanding
+                .iter()
+                .any(|m| crate::ir::Marker::classify(m).is_some());
+            if let Some(marker) = crate::ir::Marker::classify(&key).filter(|_| !nested) {
+                self.flush_ir_data();
+                let unit = self.ir_unit.clone();
+                let addr = self.loc;
+                self.ir
+                    .events
+                    .push(crate::ir::Event::Marker { marker, addr, unit });
+            }
+        }
         self.expanding.push(name.to_string());
         let refs: Vec<Line> = body.iter().map(|l| l.as_slice()).collect();
         self.run_lines(&refs);
@@ -707,6 +730,7 @@ impl<'a> Assembler<'a> {
                             size,
                             chain: self.expanding.clone(),
                             unit,
+                            routine: None,
                         }));
                 }
             }

@@ -73,6 +73,10 @@ pub struct Instruction {
     pub chain: Vec<String>,
     /// The unit being assembled.
     pub unit: String,
+    /// The routine this instruction belongs to, filled by
+    /// [`Ir::segment_routines`]. `None` means it fell outside any routine —
+    /// data areas and the like.
+    pub routine: Option<String>,
 }
 
 impl Instruction {
@@ -89,6 +93,81 @@ impl Instruction {
             self.mnemonic.as_str(),
             "BCC" | "BCS" | "BEQ" | "BMI" | "BNE" | "BPL" | "BVC" | "BVS"
         )
+    }
+}
+
+/// A structured-control-flow construct, recorded where it was invoked.
+///
+/// These are HLL65F's, and they are the reason the IR is taken from the
+/// assembler at all: after expansion an `IFEQ` is an ordinary `BNE` and nothing
+/// distinguishes it from one written by hand. `codegen-readiness.md` measured
+/// 64.4% of the game's branches as coming from these constructs, and each one
+/// lowered as native Rust `if`/`loop` is one the relooper never has to see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Marker {
+    /// `IFEQ`, `IFNE`, … — opens a conditional. The condition is the tested
+    /// one, *not* the branch emitted: `DEFIF IFEQ,BNE` means `IFEQ` emits
+    /// `BNE`, because the branch jumps over the block (`dialect.md`).
+    IfOpen { cond: String },
+    /// `ELSE`.
+    Else,
+    /// `ENDIF`, `THEN`, `ENDC` — closes a conditional.
+    IfClose,
+    /// `BEGIN` — opens a loop.
+    LoopOpen,
+    /// `EQEND`, `PLEND`, … — closes a loop, branching back while the condition
+    /// holds.
+    LoopClose { cond: String },
+    /// `EQCONT`, `PLCONT`, `CONTINUE` — jump back to the loop head.
+    LoopContinue { cond: String },
+}
+
+impl Marker {
+    /// Classify a macro name, or `None` if it is not a construct.
+    ///
+    /// The list is the one `chill65-asm`'s own `analyse()` uses for the O3
+    /// measurement, so the two cannot drift apart.
+    pub fn classify(name: &str) -> Option<Marker> {
+        let up = name.to_ascii_uppercase();
+        const CONDS: &[&str] = &["EQ", "NE", "CC", "CS", "MI", "PL", "VC", "VS"];
+        match up.as_str() {
+            "ELSE" => return Some(Marker::Else),
+            "ENDIF" | "THEN" | "ENDC" => return Some(Marker::IfClose),
+            "BEGIN" => return Some(Marker::LoopOpen),
+            "CONTINUE" => {
+                return Some(Marker::LoopContinue {
+                    cond: String::from("always"),
+                })
+            }
+            "IF" => {
+                return Some(Marker::IfOpen {
+                    cond: String::from("always"),
+                })
+            }
+            _ => {}
+        }
+        for c in CONDS {
+            if up == format!("IF{c}") {
+                return Some(Marker::IfOpen { cond: c.to_string() });
+            }
+            if up == format!("{c}END") {
+                return Some(Marker::LoopClose { cond: c.to_string() });
+            }
+            if up == format!("{c}CONT") {
+                return Some(Marker::LoopContinue { cond: c.to_string() });
+            }
+        }
+        None
+    }
+
+    /// Does this open a block that something must close?
+    pub fn opens(&self) -> bool {
+        matches!(self, Marker::IfOpen { .. } | Marker::LoopOpen)
+    }
+
+    /// Does this close one?
+    pub fn closes(&self) -> bool {
+        matches!(self, Marker::IfClose | Marker::LoopClose { .. })
     }
 }
 
@@ -118,6 +197,12 @@ pub enum Event {
     Instruction(Instruction),
     Data(Data),
     Label(Label),
+    /// A structure marker and the address it was invoked at.
+    Marker {
+        marker: Marker,
+        addr: u16,
+        unit: String,
+    },
 }
 
 /// The recorded stream.
@@ -141,6 +226,13 @@ impl Ir {
     pub fn labels(&self) -> impl Iterator<Item = &Label> {
         self.events.iter().filter_map(|e| match e {
             Event::Label(l) => Some(l),
+            _ => None,
+        })
+    }
+
+    pub fn markers(&self) -> impl Iterator<Item = (&Marker, u16)> {
+        self.events.iter().filter_map(|e| match e {
+            Event::Marker { marker, addr, .. } => Some((marker, *addr)),
             _ => None,
         })
     }
@@ -241,6 +333,71 @@ impl Ir {
         problems
     }
 
+    /// Split the program into routines and tag every instruction with the one
+    /// it belongs to.
+    ///
+    /// A routine starts at a label that is either **called or jumped to**, or
+    /// **global** — exported, so reachable from another unit whether or not
+    /// this unit calls it. Everything from one start up to the next belongs to
+    /// it. That is a deliberately structural definition: it needs no heuristics
+    /// about what code "looks like" a subroutine, and it is exactly the unit the
+    /// emitter generates one Rust function per (plan §3).
+    ///
+    /// Instructions before the first start, or in data areas, are left `None`.
+    pub fn segment_routines(&mut self) {
+        // Where control is transferred to.
+        let mut targets: std::collections::HashSet<u16> = std::collections::HashSet::new();
+        for i in self.instructions() {
+            if matches!(i.mnemonic.as_str(), "JSR" | "JMP") {
+                if let Some(v) = i.value {
+                    targets.insert(v);
+                }
+            }
+        }
+
+        // The first label recorded at each address wins, so the name does not
+        // depend on which of several aliases happened to be seen last.
+        let mut named: BTreeMap<u16, (String, bool)> = BTreeMap::new();
+        for l in self.labels() {
+            let global = l.scope == Scope::Global;
+            named
+                .entry(l.addr)
+                .and_modify(|e| e.1 |= global)
+                .or_insert((l.name.clone(), global));
+        }
+
+        let starts: Vec<(u16, String)> = named
+            .into_iter()
+            .filter(|(addr, (_, global))| *global || targets.contains(addr))
+            .map(|(addr, (name, _))| (addr, name))
+            .collect();
+
+        for event in &mut self.events {
+            let Event::Instruction(i) = event else {
+                continue;
+            };
+            i.routine = match starts.binary_search_by_key(&i.addr, |(a, _)| *a) {
+                Ok(k) => Some(starts[k].1.clone()),
+                Err(0) => None,
+                Err(k) => Some(starts[k - 1].1.clone()),
+            };
+        }
+    }
+
+    /// Every routine the program was segmented into, in address order.
+    pub fn routines(&self) -> Vec<String> {
+        let mut seen = Vec::new();
+        for i in self.instructions() {
+            if let Some(r) = &i.routine {
+                if seen.last() != Some(r) {
+                    seen.push(r.clone());
+                }
+            }
+        }
+        seen.dedup();
+        seen
+    }
+
     /// A textual dump, one event per line.
     ///
     /// Game-derived when produced from the corpus: write under `target/`, never
@@ -287,6 +444,9 @@ impl Ir {
                         "{:04X} L {} [{}] unit={}\n",
                         l.addr, l.name, l.scope, l.unit
                     ));
+                }
+                Event::Marker { marker, addr, unit } => {
+                    out.push_str(&format!("{addr:04X} M {marker:?} unit={unit}\n"));
                 }
             }
         }
