@@ -223,6 +223,11 @@ fn analyse(asm: &Assembler) {
     for (n, c) in per.iter().take(10) {
         eprintln!("      {n:<8} {c}");
     }
+
+    // O3's closing question, which the branch counts above cannot answer: of
+    // the hand-written flow, how much is *reducible* — recoverable as nested
+    // `loop`/`if` rather than a block dispatch. See `reduce.rs`.
+    eprint!("{}", chill65_asm::reduce::measure(&asm.ir).render());
 }
 
 fn report(root: &str, asm: &Assembler, image: &BTreeMap<u16, u8>) {
