@@ -92,6 +92,10 @@ fn assemble() -> Vec<u8> {
     std::fs::read(&out).expect("fixture image")
 }
 
+/// Ignored rather than part of a plain `cargo test`, because it builds the
+/// verilator simulation — minutes of compilation and a tool not everyone has.
+/// The end-to-end gate runs it explicitly, which is where a check this slow
+/// belongs.
 #[test]
 #[ignore = "needs verilator on PATH"]
 fn sprite_geometry_agrees_with_the_verilated_core() {
@@ -114,9 +118,54 @@ fn sprite_geometry_agrees_with_the_verilated_core() {
     let capture = mister::capture_blob(&path, &Trace::idle(FRAMES as usize), FRAMES)
         .expect("the core should boot our program");
 
+    let theirs: Vec<[u8; 3]> = capture.frames[FRAMES as usize - 1]
+        .chunks_exact(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+
+    // Run the same program twice: with the picture ROMs, and without. The
+    // second is the control — a gate that cannot fail is not a gate, and this
+    // is the cheapest way to show this one can.
+    let (lit, differing) = play(&prog, Some(&rom), &theirs, capture.emitted);
+    let (lit_bare, differing_bare) = play(&prog, None, &theirs, capture.emitted);
+
+    eprintln!(
+        "mob fixture: {lit} lit pixels over {} emitted columns, {differing} differing",
+        capture.emitted
+    );
+    eprintln!("  without the picture ROMs: {lit_bare} lit, {differing_bare} differing");
+
+    // 896 lit over 252 columns, measured. A regression that stopped drawing
+    // would move this before it moved anything else.
+    assert!(lit > 0, "the fixture drew nothing — it is proving nothing");
+    assert_eq!(
+        differing, 0,
+        "sprite geometry disagrees with the core in {differing} pixels"
+    );
+
+    // The control. Without the ROMs every object is transparent, so the
+    // picture must lose exactly the sprites and stop matching the core.
+    assert_eq!(lit_bare, 0, "no picture ROMs should mean no motion objects");
+    assert!(
+        differing_bare > 0,
+        "the comparison passed without the picture ROMs, so it is not \
+         measuring the sprites at all"
+    );
+}
+
+/// Run the fixture and compare against `theirs`, returning (lit, differing)
+/// over the columns the core emits.
+fn play(
+    prog: &[u8],
+    rom: Option<&[u8]>,
+    theirs: &[[u8; 3]],
+    emitted: usize,
+) -> (usize, usize) {
     let mut m = Machine::new();
-    m.load_roms(&prog, &vec![0u8; 0x4000]).expect("load");
-    m.load_motion_roms(&rom).expect("motion roms");
+    m.load_roms(prog, &vec![0u8; 0x4000]).expect("load");
+    if let Some(rom) = rom {
+        m.load_motion_roms(rom).expect("motion roms");
+    }
     let mut cpu = Cpu::new();
     cpu.reset(&mut m);
     for _ in 0..FRAMES {
@@ -130,16 +179,12 @@ fn sprite_geometry_agrees_with_the_verilated_core() {
             [r, g, b]
         })
         .collect();
-    let theirs: Vec<[u8; 3]> = capture.frames[FRAMES as usize - 1]
-        .chunks_exact(3)
-        .map(|c| [c[0], c[1], c[2]])
-        .collect();
 
     let mut differing = 0usize;
     let mut lit = 0usize;
-    for (i, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+    for (i, (a, b)) in ours.iter().zip(theirs).enumerate() {
         let col = i % WIDTH;
-        if col < FIRST_COL || col >= capture.emitted {
+        if col < FIRST_COL || col >= emitted {
             continue;
         }
         if *a != [0, 0, 0] {
@@ -149,14 +194,5 @@ fn sprite_geometry_agrees_with_the_verilated_core() {
             differing += 1;
         }
     }
-
-    eprintln!(
-        "mob fixture: {lit} lit pixels over {} emitted columns, {differing} differing",
-        capture.emitted
-    );
-    assert!(lit > 0, "the fixture drew nothing — it is proving nothing");
-    assert_eq!(
-        differing, 0,
-        "sprite geometry disagrees with the core in {differing} pixels"
-    );
+    (lit, differing)
 }
