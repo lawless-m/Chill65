@@ -569,6 +569,15 @@ pub struct Pokey {
     pub regs: [u8; 16],
     pub poly: Poly17,
     pub audio: Audio,
+    /// While set, [`Pokey::advance_to`] appends this chip's `snd` for every
+    /// cycle it steps through. Off by default: with nobody draining it the
+    /// buffer would grow without bound, and every existing caller runs frames
+    /// forever without asking for audio.
+    pub record_audio: bool,
+    /// One `snd` per CPU cycle since the buffer was last cleared. The sample
+    /// for a cycle is the level *after* that cycle's step, so index `i` is the
+    /// level during cycle `advanced_to - len + i + 1`.
+    pub samples: Vec<u8>,
     /// Machine cycle the poly has been advanced to.
     pub advanced_to: u64,
 }
@@ -585,6 +594,8 @@ impl Pokey {
             regs: [0; 16],
             poly: Poly17::new(),
             audio: Audio::new(),
+            record_audio: false,
+            samples: Vec::new(),
             advanced_to: 0,
         }
     }
@@ -615,6 +626,9 @@ impl Pokey {
             let bit = self.poly.shift & 1 != 0;
             self.poly.step(select9, init);
             self.audio.step(&self.regs, bit);
+            if self.record_audio {
+                self.samples.push(self.audio.snd(&self.regs));
+            }
         }
         self.advanced_to = self.advanced_to.max(cycle);
     }

@@ -130,6 +130,11 @@ pub struct Machine {
     /// `9400-97FF` — trackball counters and switches.
     pub input: Input,
 
+    /// Opt-in audio. Off by default; see [`Machine::set_audio_enabled`].
+    audio_enabled: bool,
+    /// The frame's `SOUT`, refilled by every `run_frame` while audio is on.
+    audio: Vec<u8>,
+
     pub cycles: u64,
     /// Cycles since the watchdog was last strobed.
     pub watchdog: u32,
@@ -193,6 +198,8 @@ impl Machine {
             pokey0: Pokey::new(),
             pokey1: Pokey::new(),
             input: Input::new(),
+            audio_enabled: false,
+            audio: Vec::new(),
             cycles: 0,
             watchdog: 0,
             watchdog_limit: DEFAULT_WATCHDOG_CYCLES,
@@ -278,6 +285,85 @@ impl Machine {
     /// [`crate::frame::FIRST_VISIBLE_LINE`] — the moment the video hardware
     /// starts reading the table. See [`Machine::mob_table`] for why a
     /// end-of-frame read is empty.
+    /// Turn the audio stream on or off.
+    ///
+    /// The runtime has no audio device, for the same reason it has no clock and
+    /// no filesystem: it must build for `wasm32-unknown-unknown`. It produces
+    /// samples and the embedder plays them, which is the seam `harness.md`
+    /// records for the EAROM and for time.
+    ///
+    /// Turning it off releases every buffer, so a caller that never asks for
+    /// audio carries no cost beyond two calls per frame that return at once.
+    pub fn set_audio_enabled(&mut self, on: bool) {
+        self.audio_enabled = on;
+        self.pokey0.record_audio = on;
+        self.pokey1.record_audio = on;
+        if !on {
+            self.audio = Vec::new();
+            self.pokey0.samples = Vec::new();
+            self.pokey1.samples = Vec::new();
+        }
+    }
+
+    pub fn audio_enabled(&self) -> bool {
+        self.audio_enabled
+    }
+
+    /// The frame just run, as `SOUT`: one sample per CPU cycle.
+    ///
+    /// Valid until the next `run_frame`, which overwrites it. Overwriting
+    /// rather than appending is deliberate — an embedder that forgets to drain
+    /// loses a frame of sound instead of leaking memory.
+    pub fn audio_samples(&self) -> &[u8] {
+        &self.audio
+    }
+
+    /// Start of frame: put both chips exactly on the frame boundary with
+    /// recording off, then start recording from an empty buffer.
+    ///
+    /// The chips advance lazily, on register access, so at this instant one may
+    /// be behind the other. Squaring them up here is what makes the two sample
+    /// buffers index the same cycles, which is what lets them be summed.
+    pub fn begin_audio_frame(&mut self) {
+        if !self.audio_enabled {
+            return;
+        }
+        let at = self.cycles;
+        for p in [&mut self.pokey0, &mut self.pokey1] {
+            p.record_audio = false;
+            p.advance_to(at);
+            p.samples.clear();
+            p.record_audio = true;
+        }
+    }
+
+    /// End of frame: bring both chips to the last cycle executed and sum them.
+    ///
+    /// `AudioOutput.v:51` wires the pair as `SOUT = {2'b00,snd1}+{2'b00,snd2}` —
+    /// a plain sum of the two six-bit outputs, so 0-120 in eight bits. That is
+    /// a fact about how this board combines the chips, not about either chip.
+    ///
+    /// Advancing here cannot disturb anything: `advance_to` is a pure function
+    /// of the elapsed cycle count, and the extra boundary only splits a span in
+    /// which no register was written, so `RANDOM` and the poly are untouched.
+    pub fn end_audio_frame(&mut self) {
+        if !self.audio_enabled {
+            return;
+        }
+        let at = self.cycles;
+        self.pokey0.advance_to(at);
+        self.pokey1.advance_to(at);
+        debug_assert_eq!(self.pokey0.samples.len(), self.pokey1.samples.len());
+        self.audio.clear();
+        self.audio.extend(
+            self.pokey0
+                .samples
+                .iter()
+                .zip(&self.pokey1.samples)
+                .map(|(a, b)| a + b),
+        );
+    }
+
     pub fn latch_motion_objects(&mut self) {
         self.mob_table.copy_from_slice(&self.sram[0xE00..0x1000]);
         self.mob_out1 = self.out1;

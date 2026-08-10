@@ -179,6 +179,7 @@ pub fn run_frame(cpu: &mut Cpu, machine: &mut Machine) -> Result<FrameStats, Cpu
     // Plan §6: host movement accumulated since the last frame is presented to
     // the CPU exactly once, here, at the frame boundary.
     machine.input.latch_frame();
+    machine.begin_audio_frame();
 
     for line in 0..LINES_PER_FRAME {
         // VBLANK is bit 5 of the switch port and the game polls it, so it must
@@ -211,6 +212,7 @@ pub fn run_frame(cpu: &mut Cpu, machine: &mut Machine) -> Result<FrameStats, Cpu
         }
     }
 
+    machine.end_audio_frame();
     stats.cycles = machine.cycles - start;
     Ok(stats)
 }
@@ -230,6 +232,7 @@ pub fn run_frame_with(
     let mut stats = FrameStats::default();
 
     machine.input.latch_frame();
+    machine.begin_audio_frame();
 
     for line in 0..LINES_PER_FRAME {
         machine.input.vblank = line < FIRST_VISIBLE_LINE;
@@ -263,6 +266,7 @@ pub fn run_frame_with(
         }
     }
 
+    machine.end_audio_frame();
     stats.cycles = machine.cycles - start;
     Ok(stats)
 }
@@ -635,5 +639,153 @@ mod tests {
             "PC wandered to {:04X} — something raised NMI",
             cpu.pc
         );
+    }
+
+    /// Programme one POKEY channel so the stream has something in it: a pure
+    /// tone at full volume, which alternates between silence and 15.
+    fn sounding() -> (Cpu, Machine) {
+        let (cpu, mut m) = machine_with_isr();
+        let at = m.cycles;
+        m.pokey0.write(crate::pokey::reg::SKCTL, 0x07, at);
+        m.pokey0.write(0, 0, at); // AUDF0
+        m.pokey0.write(1, 0xAF, at); // AUDC0: pure tone, volume 15
+        m.pokey0.write(crate::pokey::reg::STIMER, 0, at);
+        (cpu, m)
+    }
+
+    #[test]
+    fn audio_is_off_by_default_and_retains_nothing() {
+        let (mut cpu, mut m) = sounding();
+        assert!(!m.audio_enabled());
+        for _ in 0..8 {
+            run_frame(&mut cpu, &mut m).unwrap();
+        }
+        assert!(m.audio_samples().is_empty(), "nobody asked for audio");
+        assert!(m.pokey0.samples.is_empty(), "and no chip buffered any");
+        assert!(m.pokey1.samples.is_empty());
+    }
+
+    /// One sample per CPU cycle the frame actually ran.
+    ///
+    /// That is [`CYCLES_PER_FRAME`] plus the documented overshoot: interrupts
+    /// are checked at instruction boundaries, so the last line can run a few
+    /// cycles past its deadline. Emitting the true span rather than a fixed
+    /// 20,480 is deliberate — trimming would drop cycles of sound and padding
+    /// would invent them, and either would drift the audio clock away from the
+    /// CPU's over a run of any length.
+    #[test]
+    fn an_enabled_frame_yields_one_sample_per_cycle() {
+        let (mut cpu, mut m) = sounding();
+        m.set_audio_enabled(true);
+        for _ in 0..4 {
+            let stats = run_frame(&mut cpu, &mut m).unwrap();
+            assert_eq!(m.audio_samples().len() as u64, stats.cycles);
+            assert!(
+                (CYCLES_PER_FRAME as u64..CYCLES_PER_FRAME as u64 + 7).contains(&stats.cycles),
+                "{} samples",
+                stats.cycles
+            );
+        }
+    }
+
+    /// The frame is refilled, not appended to, so an embedder that never drains
+    /// cannot grow the buffer.
+    #[test]
+    fn the_buffer_is_replaced_each_frame() {
+        let (mut cpu, mut m) = sounding();
+        m.set_audio_enabled(true);
+        run_frame(&mut cpu, &mut m).unwrap();
+        let first = m.audio_samples().len();
+        for _ in 0..6 {
+            run_frame(&mut cpu, &mut m).unwrap();
+            assert!(m.audio_samples().len() < first + 8, "one frame's worth, not seven");
+        }
+    }
+
+    /// Audio must be observationally free: identical pictures and identical
+    /// cycle counts either way. If this fails, recording has perturbed the
+    /// machine — most likely by advancing a POKEY across a register write.
+    #[test]
+    fn audio_does_not_change_the_frame_hash_or_the_cycle_count() {
+        let (mut ca, mut a) = sounding();
+        let (mut cb, mut b) = sounding();
+        b.set_audio_enabled(true);
+        for frame in 0..12 {
+            let sa = run_frame(&mut ca, &mut a).unwrap();
+            let sb = run_frame(&mut cb, &mut b).unwrap();
+            assert_eq!(a.frame_hash(), b.frame_hash(), "frame {frame}");
+            assert_eq!(sa.cycles, sb.cycles, "frame {frame}");
+            assert_eq!(a.cycles, b.cycles, "frame {frame}");
+            // And RANDOM still reads the same, which is the one POKEY output
+            // the game makes decisions from.
+            let at = a.cycles;
+            assert_eq!(
+                a.pokey0.read(crate::pokey::reg::RANDOM, at),
+                b.pokey0.read(crate::pokey::reg::RANDOM, at),
+                "frame {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_identically_driven_machines_produce_the_same_stream() {
+        let (mut ca, mut a) = sounding();
+        let (mut cb, mut b) = sounding();
+        a.set_audio_enabled(true);
+        b.set_audio_enabled(true);
+        for frame in 0..6 {
+            run_frame(&mut ca, &mut a).unwrap();
+            run_frame(&mut cb, &mut b).unwrap();
+            assert_eq!(a.audio_samples(), b.audio_samples(), "frame {frame}");
+        }
+    }
+
+    /// A programmed channel actually sounds, and a silent chip actually does
+    /// not — so the test above is not comparing two empty streams.
+    #[test]
+    fn the_stream_carries_the_programmed_tone_and_silence_is_silent() {
+        let (mut cpu, mut m) = sounding();
+        m.set_audio_enabled(true);
+        run_frame(&mut cpu, &mut m).unwrap();
+        let s = m.audio_samples();
+        assert!(s.iter().any(|&v| v == 15), "the tone is present");
+        assert!(s.iter().any(|&v| v == 0), "and it is a square wave");
+
+        let (mut cpu, mut m) = machine_with_isr();
+        m.set_audio_enabled(true);
+        run_frame(&mut cpu, &mut m).unwrap();
+        assert!(
+            m.audio_samples().iter().all(|&v| v == 0),
+            "an unprogrammed board is silent"
+        );
+    }
+
+    /// Turning audio off releases the buffers rather than merely stopping.
+    #[test]
+    fn disabling_audio_releases_the_buffers() {
+        let (mut cpu, mut m) = sounding();
+        m.set_audio_enabled(true);
+        run_frame(&mut cpu, &mut m).unwrap();
+        assert!(!m.audio_samples().is_empty());
+        m.set_audio_enabled(false);
+        assert!(m.audio_samples().is_empty());
+        run_frame(&mut cpu, &mut m).unwrap();
+        assert!(m.audio_samples().is_empty(), "and stays released");
+    }
+
+    /// The dispatched loop must behave like the interpreted one here too.
+    #[test]
+    fn the_compiled_loop_produces_the_same_stream() {
+        let (mut ca, mut a) = sounding();
+        let (mut cb, mut b) = sounding();
+        a.set_audio_enabled(true);
+        b.set_audio_enabled(true);
+        let mut spin = CompiledSpin { executed: 0 };
+        for frame in 0..4 {
+            run_frame(&mut ca, &mut a).unwrap();
+            run_frame_with(&mut cb, &mut b, &mut spin).unwrap();
+            assert_eq!(a.audio_samples(), b.audio_samples(), "frame {frame}");
+        }
+        assert!(spin.compiled_instructions() > 0, "the dispatch really ran");
     }
 }
