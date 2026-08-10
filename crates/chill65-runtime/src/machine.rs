@@ -35,7 +35,7 @@
 use crate::bus::Bus;
 use crate::input::Input;
 use crate::pokey::Pokey;
-use crate::video::Video;
+use crate::video::{Video, HEIGHT, ROW_BYTES, WIDTH};
 
 /// How many cycles the watchdog tolerates between strobes.
 ///
@@ -118,6 +118,24 @@ pub struct Machine {
     pub bank_writes: u64,
     /// Writes that actually flipped the bank.
     pub bank_switches: u64,
+
+    /// Address of the instruction currently executing, kept up to date through
+    /// [`Bus::begin_instruction`]. One store per instruction, always.
+    pub current_pc: u16,
+
+    /// Which instruction last wrote each bitmap nibble. `None` unless
+    /// [`Machine::enable_write_log`] has been called; nothing is recorded and
+    /// nothing is allocated until then.
+    ///
+    /// Indexed `addr * 2 + parity`, where `parity` is 1 for the high nibble —
+    /// the same parity rule [`Video::window_read`] and [`Video::framebuffer`]
+    /// use. **Keyed by RAM address, not by screen position**, and that is the
+    /// whole design: a store lands at an address, but which pixel of the
+    /// picture that address is depends on the scroll registers *at the moment
+    /// the picture is read*. Recording screen positions at write time would be
+    /// silently wrong the first time the game scrolls.
+    /// [`Machine::pixel_writers`] does the projection instead.
+    pub writers: Option<Box<[Option<u16>]>>,
 }
 
 impl Default for Machine {
@@ -148,7 +166,56 @@ impl Machine {
             watchdog_strobes: 0,
             bank_writes: 0,
             bank_switches: 0,
+            current_pc: 0,
+            writers: None,
         }
+    }
+
+    /// Start recording which instruction last wrote each bitmap nibble.
+    ///
+    /// Off by default. Turning it on allocates the log and costs one store per
+    /// bitmap write; it changes nothing the machine computes.
+    pub fn enable_write_log(&mut self) {
+        self.writers = Some(vec![None; self.ram.len() * 2].into_boxed_slice());
+    }
+
+    /// Record that the current instruction wrote one nibble.
+    #[inline]
+    fn note_nibble(&mut self, addr: usize, high: bool) {
+        let pc = self.current_pc;
+        if let Some(log) = self.writers.as_mut() {
+            log[addr * 2 + high as usize] = Some(pc);
+        }
+    }
+
+    /// Record that the current instruction wrote a whole byte — both pixels.
+    #[inline]
+    fn note_byte(&mut self, addr: usize) {
+        let pc = self.current_pc;
+        if let Some(log) = self.writers.as_mut() {
+            log[addr * 2] = Some(pc);
+            log[addr * 2 + 1] = Some(pc);
+        }
+    }
+
+    /// Which instruction last wrote each visible pixel, indexed exactly as
+    /// [`Machine::framebuffer`] — row-major, `WIDTH * HEIGHT`.
+    ///
+    /// `None` if the log is off, and `None` per pixel for anything not written
+    /// since it was switched on. The projection uses the scroll registers as
+    /// they are *now*, matching what `framebuffer` would return now.
+    pub fn pixel_writers(&self) -> Option<Vec<Option<u16>>> {
+        let log = self.writers.as_ref()?;
+        let mut out = vec![None; WIDTH * HEIGHT];
+        for line in 0..HEIGHT {
+            let base = self.video.row_for_line(line) as usize * ROW_BYTES;
+            for px in 0..WIDTH {
+                let x = self.video.hscroll.wrapping_add(px as u8);
+                let addr = base + (x >> 1) as usize;
+                out[line * WIDTH + px] = log[addr * 2 + (x & 1) as usize];
+            }
+        }
+        Some(out)
     }
 
     /// Load the two ROM images produced by the Phase 1 assembler.
@@ -206,6 +273,10 @@ impl Machine {
 }
 
 impl Bus for Machine {
+    fn begin_instruction(&mut self, pc: u16) {
+        self.current_pc = pc;
+    }
+
     fn read(&mut self, addr: u16) -> u8 {
         match addr {
             // The bitmap data window. `BITMDn` is not qualified by `BRWn`
@@ -265,18 +336,31 @@ impl Bus for Machine {
             0x0000 => {
                 self.video.xcoord = value;
                 self.ram[0] = value;
+                self.note_byte(0);
             }
             0x0001 => {
                 self.video.ycoord = value;
                 self.ram[1] = value;
+                self.note_byte(1);
             }
             // The window. The write goes to the coordinate address, never to
             // 0002 itself, and may be dropped entirely below row 32.
             0x0002 => {
+                // Read the target before the write, since `auto_step` moves the
+                // coordinates on immediately afterwards.
+                let target = self.video.window_addr() as usize;
+                let high = self.video.pixa();
+                let landed = self.video.window_write_enabled();
                 self.video.window_write(&mut self.ram[..], value);
+                if landed {
+                    self.note_nibble(target, high);
+                }
                 self.video.auto_step(self.out1);
             }
-            0x0003..=0x7FFF => self.ram[addr as usize] = value,
+            0x0003..=0x7FFF => {
+                self.ram[addr as usize] = value;
+                self.note_byte(addr as usize);
+            }
             0x8000..=0x8FFF => self.sram[(addr - 0x8000) as usize] = value,
             0x9000..=0x93FF => self.earom[(addr & 0xFF) as usize] = value,
 
@@ -353,6 +437,98 @@ mod tests {
         // A marker up in the fixed region.
         m.prog[0xE000 - 0xA000] = 0xA9;
         m
+    }
+
+    /// Set a coordinate, plant a pixel through the window, and stop.
+    ///
+    /// ```text
+    /// 0200  A9 40   LDA #$40     ; row 64 — at or above row 32, so writable
+    /// 0202  85 01   STA $01      ; Y coordinate
+    /// 0204  A9 10   LDA #$10     ; x = 16, an even column: the low nibble
+    /// 0206  85 00   STA $00      ; X coordinate
+    /// 0208  A9 50   LDA #$50     ; pixel value 5, in the high nibble
+    /// 020A  85 02   STA $02      ; <- the write we expect to be blamed
+    /// ```
+    const PLANT: [u8; 12] = [
+        0xA9, 0x40, 0x85, 0x01, 0xA9, 0x10, 0x85, 0x00, 0xA9, 0x50, 0x85, 0x02,
+    ];
+    /// Address of the `STA $02` above.
+    const PLANT_STORE_PC: u16 = 0x020A;
+    /// `{yCoord, xCoord[7:1]}` for row 64, x 16.
+    const PLANT_ADDR: usize = (0x40 << 7) | (0x10 >> 1);
+
+    fn run_plant(log: bool) -> (Machine, crate::Cpu) {
+        let mut m = Machine::new();
+        m.ram[0x0200..0x0200 + PLANT.len()].copy_from_slice(&PLANT);
+        if log {
+            m.enable_write_log();
+        }
+        let mut cpu = crate::Cpu::new();
+        cpu.pc = 0x0200;
+        for _ in 0..6 {
+            cpu.step(&mut m).expect("plant program runs");
+        }
+        (m, cpu)
+    }
+
+    #[test]
+    fn the_write_log_blames_the_instruction_that_stored_the_pixel() {
+        let (m, _) = run_plant(true);
+
+        let log = m.writers.as_ref().expect("log enabled");
+        let at = |addr: usize, high: bool| log[addr * 2 + high as usize];
+
+        assert_eq!(
+            at(PLANT_ADDR, false),
+            Some(PLANT_STORE_PC),
+            "the low nibble at {PLANT_ADDR:04X} should be blamed on the STA $02"
+        );
+        assert_eq!(
+            at(PLANT_ADDR, true),
+            None,
+            "the neighbouring pixel in the same byte was never written"
+        );
+
+        // The coordinate stores are attributed to their own instructions.
+        assert_eq!(at(1, false), Some(0x0202), "STA $01 wrote ram[1]");
+        assert_eq!(at(0, false), Some(0x0206), "STA $00 wrote ram[0]");
+    }
+
+    #[test]
+    fn the_log_projects_onto_the_same_pixels_as_the_framebuffer() {
+        let (m, _) = run_plant(true);
+
+        // Row 64 with the scroll at its floor of 24 is visible line 40, and
+        // x 16 with no horizontal scroll is column 16.
+        let line = 0x40 - crate::video::VSCROLL_FLOOR as usize;
+        let index = line * WIDTH + 16;
+
+        assert_eq!(m.framebuffer()[index], 5, "the pixel we planted");
+        let writers = m.pixel_writers().expect("log enabled");
+        assert_eq!(writers[index], Some(PLANT_STORE_PC));
+        assert_eq!(
+            writers[index + 1],
+            None,
+            "the pixel next door is untouched, not blamed by association"
+        );
+    }
+
+    #[test]
+    fn the_log_is_off_by_default_and_changes_nothing_when_on() {
+        let (plain, _) = run_plant(false);
+        assert!(plain.writers.is_none(), "off unless asked for");
+        assert!(plain.pixel_writers().is_none());
+
+        let (logged, _) = run_plant(true);
+        assert_eq!(
+            plain.frame_hash(),
+            logged.frame_hash(),
+            "enabling the log changed the picture"
+        );
+        assert_eq!(
+            plain.cycles, logged.cycles,
+            "enabling the log changed the cycle count"
+        );
     }
 
     #[test]

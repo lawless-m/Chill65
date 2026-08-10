@@ -29,6 +29,15 @@ pub trait Bus {
         let _ = cycles;
     }
 
+    /// Announce the instruction about to execute, by its address.
+    ///
+    /// Default no-op, and [`FlatBus`] leaves it that way. [`crate::Machine`]
+    /// uses it to attribute bitmap writes to the instruction that made them,
+    /// which is what turns "these pixels differ" into "this routine drew them".
+    fn begin_instruction(&mut self, pc: u16) {
+        let _ = pc;
+    }
+
     /// Read without side effects, for debuggers and tests.
     ///
     /// Defaults to [`Bus::read`]; implementations with side-effecting reads

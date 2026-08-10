@@ -35,6 +35,7 @@ impl Cpu {
     /// the page-cross and branch penalties are layered on in a later task.
     pub fn step(&mut self, bus: &mut impl Bus) -> Result<u8, CpuError> {
         let pc = self.pc;
+        bus.begin_instruction(pc);
         let opcode = self.fetch(bus);
 
         let cycles = match opcode {
