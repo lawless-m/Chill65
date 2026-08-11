@@ -355,9 +355,24 @@ impl<'a> Assembler<'a> {
                 // and so do the section offsets — that is what makes two
                 // modules contributing to one section concatenate rather than
                 // land on top of each other. Each unit starts absolute.
-                self.section = None;
+                //
+                // A unit begins in the **blank section**, not the absolute
+                // one: `.ASECT` is an explicit switch into absolute, and
+                // MACRO-11's default is relocatable. Most modules say `.ASECT`
+                // in their first few lines and so are absolute in practice, but
+                // `AS2COI.MAC` and `A2GOOF.MAC` never declare a section at all
+                // — treating them as absolute piled them at `0000`, on top of
+                // each other and over nothing the oracle has.
                 self.abs_loc = 0;
-                self.loc = 0;
+                self.section = Some(UNNAMED_SECTION.to_string());
+                let base = self
+                    .sec_base
+                    .get(UNNAMED_SECTION)
+                    .copied()
+                    .unwrap_or(PROBE_BASE);
+                self.loc = base.wrapping_add(
+                    self.sec_off.get(UNNAMED_SECTION).copied().unwrap_or(0),
+                );
                 self.radix = 16;
                 self.ama = false;
                 self.m68 = false;
@@ -1577,6 +1592,17 @@ impl<'a> Assembler<'a> {
         let base = self.sec_base.get(&cur).copied().unwrap_or(PROBE_BASE);
         let off = self.loc.wrapping_sub(base);
         self.sec_off.insert(cur.clone(), off);
+        // A section joins the layout when something is actually *in* it, not
+        // when a directive naming it goes by. Every unit begins in the blank
+        // section (see the per-unit reset), so registering on entry would put
+        // the blank one first in every build that has any section at all;
+        // registering on content puts it where its first contribution lands.
+        // `AS2COI.MAC` is the case that settles it — it declares no section
+        // anywhere, and the oracle has it at `741A`, which is exactly where
+        // `AS2POK` ends.
+        if off > 0 && !self.sec_order.contains(&cur) {
+            self.sec_order.push(cur.clone());
+        }
         let high = self.sec_size.entry(cur).or_insert(0);
         if off > *high {
             *high = off;
@@ -1588,9 +1614,6 @@ impl<'a> Assembler<'a> {
         self.park_section();
         match name {
             Some(n) => {
-                if !self.sec_order.contains(&n) {
-                    self.sec_order.push(n.clone());
-                }
                 let base = self.sec_base.get(&n).copied().unwrap_or(PROBE_BASE);
                 let off = self.sec_off.get(&n).copied().unwrap_or(0);
                 self.loc = base.wrapping_add(off);
