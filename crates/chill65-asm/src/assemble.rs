@@ -212,6 +212,16 @@ pub struct Assembler<'a> {
 /// every named one.
 const UNNAMED_SECTION: &str = "~blank";
 
+/// The blank section belongs to one unit, so each gets its own.
+///
+/// A named `.CSECT` is shared — two modules opening `AS2MSG` are appending to
+/// one region. The blank one is not: `AS2COI`'s blank content sits at `741A`
+/// and `A2GOOF`'s at `8F43`, two and a half kilobytes apart, each immediately
+/// after the module that precedes it in link order.
+fn blank_section(unit: &str) -> String {
+    format!("{UNNAMED_SECTION}@{unit}")
+}
+
 /// Where the relocatable sections begin.
 ///
 /// Derived, not chosen. Assembling each module alone and searching `ASTRD2.LDA`
@@ -377,15 +387,19 @@ impl<'a> Assembler<'a> {
                 // — treating them as absolute piled them at `0000`, on top of
                 // each other and over nothing the oracle has.
                 self.abs_loc = 0;
-                self.section = Some(UNNAMED_SECTION.to_string());
-                let base = self
-                    .sec_base
-                    .get(UNNAMED_SECTION)
-                    .copied()
-                    .unwrap_or(PROBE_BASE);
-                self.loc = base.wrapping_add(
-                    self.sec_off.get(UNNAMED_SECTION).copied().unwrap_or(0),
-                );
+                //
+                // The blank section is **per unit**, unlike a named one. Two
+                // modules that both fall into it are not contributing to a
+                // shared region: `AS2COI` is the sixth module and the oracle
+                // places its blank content at `741A`, right after `AS2POK`,
+                // while `A2GOOF` is the fifteenth and sits at `8F43`, right
+                // after `VGUTR2` — the far end of the image. Merging them put
+                // `A2GOOF`'s sixteen bytes at `741A` too and pushed everything
+                // after it sixteen bytes late.
+                let blank = blank_section(root_name);
+                self.section = Some(blank.clone());
+                let base = self.sec_base.get(&blank).copied().unwrap_or(PROBE_BASE);
+                self.loc = base.wrapping_add(self.sec_off.get(&blank).copied().unwrap_or(0));
                 self.radix = 16;
                 self.ama = false;
                 self.m68 = false;
@@ -1073,7 +1087,9 @@ impl<'a> Assembler<'a> {
                     _ => None,
                 }) {
                     Some(n) => n,
-                    None => UNNAMED_SECTION.to_string(),
+                    // A bare `.CSECT` *is* the blank section, and the blank
+                    // section belongs to this unit.
+                    None => blank_section(&self.ir_unit),
                 };
                 self.enter_section(Some(name));
             }
@@ -3061,7 +3077,7 @@ mod tests {
         // `.ASECT` resumed at A001, not at 0 and not inside a section.
         assert_eq!(bytes(&img, 0xA000, 2), vec![0x11, 0x22]);
         // The blank section is a section, and a different one from NAMED.
-        let blank = a.sec_base[UNNAMED_SECTION];
+        let blank = a.sec_base[&blank_section("A.MAC")];
         let named = a.sec_base["NAMED"];
         assert_eq!(blank, SECTION_ORIGIN);
         assert_eq!(named, SECTION_ORIGIN + 2, "NAMED follows the blank section's two bytes");
