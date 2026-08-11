@@ -877,7 +877,8 @@ impl<'a> Assembler<'a> {
                 return 1;
             }
             Dir::Rept => return self.repeat_block(args, lines, idx),
-            Dir::Irp => return self.irp_block(args, lines, idx),
+            Dir::Irp => return self.irp_block(args, lines, idx, false),
+            Dir::Irpc => return self.irp_block(args, lines, idx, true),
             Dir::Macro => return self.define_macro(args, lines, idx),
             Dir::Endm => return 1, // consumed by define_macro
             Dir::Endr => {
@@ -1165,8 +1166,8 @@ impl<'a> Assembler<'a> {
                 self.emit(0);
             }
 
-            Dir::If | Dir::Iff | Dir::Ift | Dir::Endc | Dir::Rept | Dir::Irp | Dir::Endr
-            | Dir::Macro | Dir::Endm | Dir::Iftf => unreachable!(),
+            Dir::If | Dir::Iff | Dir::Ift | Dir::Endc | Dir::Rept | Dir::Irp | Dir::Irpc
+            | Dir::Endr | Dir::Macro | Dir::Endm | Dir::Iftf => unreachable!(),
         }
         1
     }
@@ -1223,7 +1224,9 @@ impl<'a> Assembler<'a> {
 
     /// `.IRP NAME,<a,b,c>` … `.ENDR` — run the body once per item with NAME
     /// bound to it. Shares `.ENDR` with `.REPT`, so the scanner counts both.
-    fn irp_block(&mut self, args: Line, lines: &[Line], idx: usize) -> usize {
+    /// `.IRP` and `.IRPC`. They differ only in how the item list is cut:
+    /// `.IRP` takes comma-separated items, `.IRPC` one character each.
+    fn irp_block(&mut self, args: Line, lines: &[Line], idx: usize, per_char: bool) -> usize {
         let mut depth = 1usize;
         let mut j = idx + 1;
         while j < lines.len() {
@@ -1239,31 +1242,69 @@ impl<'a> Assembler<'a> {
             j += 1;
         }
         if depth != 0 {
-            self.errors.push(".IRP without matching .ENDR".into());
+            let which = if per_char { ".IRPC" } else { ".IRP" };
+            self.errors.push(format!("{which} without matching .ENDR"));
             return lines.len() - idx;
         }
 
         if self.active() {
             let fields = split_commas(args);
-            let name = fields.first().and_then(|f| match f.first().map(|t| &t.tok) {
-                Some(Tok::Symbol(s)) => Some(s.clone()),
-                _ => None,
-            });
+            // `.IRP X,<...>` names its parameter after an addressing mode, so
+            // the lexer classified `X,` as a mode prefix and swallowed the
+            // separating comma — the same collision `macros.rs` already
+            // recovers from in `.MACRO CMPIN A,B`. When that happens the name
+            // and the item list are left in one field instead of two.
+            //
+            // Every `.IRP` in Crystal Castles names its parameter `OPC`, which
+            // is why this went unnoticed: the whole directive silently expanded
+            // to nothing only for single-letter mode names, and Space Duel's
+            // `.IRPC X,<0123>` is the first use that hits it.
+            let (name, list): (Option<String>, Vec<Token>) =
+                match fields.first().and_then(|f| f.first()).map(|t| &t.tok) {
+                    Some(Tok::Symbol(s)) => (
+                        Some(s.clone()),
+                        fields.get(1).map(|f| f.to_vec()).unwrap_or_default(),
+                    ),
+                    Some(Tok::Prefix(m)) => {
+                        (Some(m.name().to_string()), fields[0][1..].to_vec())
+                    }
+                    _ => (None, Vec::new()),
+                };
             if let Some(name) = name {
                 // The item list arrives as one bracketed field; split it.
-                let items: Vec<Vec<Token>> = match fields.get(1) {
-                    Some(f) => {
-                        let inner: Vec<Token> = f
-                            .iter()
-                            .filter(|t| !matches!(t.tok, Tok::Punct('<') | Tok::Punct('>')))
-                            .cloned()
-                            .collect();
+                let items: Vec<Vec<Token>> = {
+                    let inner: Vec<Token> = list
+                        .iter()
+                        .filter(|t| !matches!(t.tok, Tok::Punct('<') | Tok::Punct('>')))
+                        .cloned()
+                        .collect();
+                    if per_char {
+                        // One iteration per character of the argument's raw
+                        // text. `Tok::Number` keeps its digits verbatim, so
+                        // `<0123>` yields "0", "1", "2", "3" rather than the
+                        // single value those digits would evaluate to.
+                        match inner.first() {
+                            Some(first) => {
+                                let text: String =
+                                    inner.iter().map(crate::macros::token_text).collect();
+                                text.chars()
+                                    .map(|c| {
+                                        vec![Token {
+                                            tok: Tok::Symbol(c.to_string()),
+                                            span: first.span.clone(),
+                                            space_before: false,
+                                        }]
+                                    })
+                                    .collect()
+                            }
+                            None => Vec::new(),
+                        }
+                    } else {
                         split_commas(&inner).into_iter().map(|x| x.to_vec()).collect()
                     }
-                    None => Vec::new(),
                 };
                 let template = MacroDef {
-                    name: format!("<.IRP {name}>"),
+                    name: format!("<.IRP{} {name}>", if per_char { "C" } else { "" }),
                     params: vec![crate::macros::Param {
                         name: name.clone(),
                         generated: false,
@@ -1549,7 +1590,10 @@ fn intern(name: &str) -> String {
 /// skips everything it scanned, it silently swallowed the rest of six files —
 /// taking every label defined after the block with it.
 fn opens_block(d: Option<Dir>) -> bool {
-    matches!(d, Some(Dir::Rept) | Some(Dir::Irp) | Some(Dir::Macro))
+    matches!(
+        d,
+        Some(Dir::Rept) | Some(Dir::Irp) | Some(Dir::Irpc) | Some(Dir::Macro)
+    )
 }
 
 fn closes_block(d: Option<Dir>) -> bool {
@@ -1616,6 +1660,104 @@ mod tests {
         let mut a = Assembler::new(&p);
         let img = a.assemble("MAIN.MAC").expect("assembly failed");
         (img, a.ir.clone())
+    }
+
+    /// `.IRP` repeats once per comma-separated item. This is the shape Crystal
+    /// Castles uses (`HLL65F.MAC:224`, `.IRP OPC,<ASL,ROL,...>`), which is why
+    /// the bug below stayed hidden.
+    #[test]
+    fn irp_repeats_once_per_item() {
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             	.IRP OPC,<7,8,9>\n\
+             	.BYTE OPC\n\
+             	.ENDR\n\
+             	.END\n",
+        )])
+        .expect("assembly failed");
+        let bytes: Vec<u8> = (0xA000u16..0xA004).filter_map(|a| img.get(&a).copied()).collect();
+        assert_eq!(bytes, vec![7, 8, 9]);
+    }
+
+    /// A parameter named after an addressing mode still works.
+    ///
+    /// `X,` is lexed as an indexed-addressing prefix that swallows the comma,
+    /// so the name and the item list arrive in one field rather than two.
+    /// Before this was recovered, the whole directive expanded to **nothing**,
+    /// silently — no error, no bytes. Crystal Castles names its one `.IRP`
+    /// parameter `OPC` and so never hit it.
+    #[test]
+    fn irp_accepts_a_parameter_named_after_an_addressing_mode() {
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             	.IRP X,<7,8,9>\n\
+             	.BYTE X\n\
+             	.ENDR\n\
+             	.END\n",
+        )])
+        .expect("assembly failed");
+        let bytes: Vec<u8> = (0xA000u16..0xA004).filter_map(|a| img.get(&a).copied()).collect();
+        assert_eq!(bytes, vec![7, 8, 9], "the body must run, not be skipped");
+    }
+
+    /// `.IRPC` repeats once per character, and the substitution really varies:
+    /// the three symbols it defines are referenced afterwards, so a body that
+    /// silently expanded to nothing would fail as undefined rather than pass.
+    #[test]
+    fn irpc_repeats_once_per_character_and_concatenates() {
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             	.IRPC X,<012>\n\
+             SYM'X=1\n\
+             	.ENDR\n\
+             	.BYTE SYM0,SYM1,SYM2\n\
+             	.END\n",
+        )])
+        .expect("assembly failed");
+        let bytes: Vec<u8> = (0xA000u16..0xA004).filter_map(|a| img.get(&a).copied()).collect();
+        assert_eq!(bytes, vec![1, 1, 1], "SYM0, SYM1 and SYM2 must all exist");
+    }
+
+    /// The characters come from the argument's raw text, not its value.
+    ///
+    /// `<0123>` lexes as a single number. Splitting what it evaluates to would
+    /// give one iteration; splitting its digits gives four — which is what
+    /// Space Duel's `ROCK'X'1` over `<0123>` relies on.
+    #[test]
+    fn irpc_splits_the_raw_text_not_the_evaluated_number() {
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             	.IRPC X,<0123>\n\
+             	.BYTE 0FF\n\
+             	.ENDR\n\
+             	.END\n",
+        )])
+        .expect("assembly failed");
+        let bytes: Vec<u8> = (0xA000u16..0xA010).filter_map(|a| img.get(&a).copied()).collect();
+        assert_eq!(bytes, vec![0xFF; 4], "one iteration per digit");
+    }
+
+    /// `.IRPC` opens a block, so an unterminated one must be diagnosed rather
+    /// than swallowing the rest of the file — the failure `opens_block` already
+    /// carries a comment about.
+    #[test]
+    fn an_unterminated_irpc_is_reported() {
+        let errs = asm(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             	.IRPC X,<01>\n\
+             	.BYTE 0FF\n\
+             	.END\n",
+        )])
+        .expect_err("should not assemble");
+        assert!(
+            errs.iter().any(|e| e.contains(".IRPC without matching .ENDR")),
+            "{errs:?}"
+        );
     }
 
     #[test]

@@ -35,6 +35,11 @@ pub enum Dir {
     /// One occurrence in the corpus (`HLL65F.MAC:224`) but it generates the
     /// counted shift macros `ASLS`/`LSRS`/`INXS`/... used ~100 times.
     Irp,
+    /// `.IRPC NAME,<chars>` — repeat the body once per *character*, where
+    /// `.IRP` repeats once per comma-separated item. Absent from Crystal
+    /// Castles; Space Duel uses it fourteen times, building parallel symbol
+    /// families such as `ROCK'X'1` over `<0123>`.
+    Irpc,
     Endr,
     Error,
     Globl,
@@ -80,6 +85,7 @@ pub fn classify(name: &str) -> Option<Dir> {
         ".ENDC" => Dir::Endc,
         ".REPT" => Dir::Rept,
         ".IRP" => Dir::Irp,
+        ".IRPC" => Dir::Irpc,
         ".ENDR" => Dir::Endr,
         ".ERROR" => Dir::Error,
         ".GLOBL" => Dir::Globl,
