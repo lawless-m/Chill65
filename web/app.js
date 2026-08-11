@@ -30,6 +30,34 @@ const FRAME_MS = 1000 / FRAME_HZ;
 // minutes of missed frames would hang the page for a minute.
 const MAX_CATCHUP_FRAMES = 4;
 
+// --- sound ------------------------------------------------------------------
+//
+// The module hands us the hardware's own samples: one byte per CPU cycle at
+// 1.25 MHz, the sum of two six-bit POKEYs, so 0-120. Nothing resamples them for
+// us, because the module has no audio device — the same seam the EAROM sits on.
+//
+// The hard part is not making a noise, it is not making a bad one. Game frames
+// are driven from accumulated real time in a `requestAnimationFrame` loop, and
+// that clock has nothing to do with the audio device's. So each frame's samples
+// are scheduled against the AudioContext's own clock, at a cursor that runs
+// ahead of it.
+const CPU_HZ = 1250000;
+// SOUT's range: two six-bit chips summed.
+const SOUT_MAX = 120;
+// How far ahead of the context clock chunks are scheduled. It has to absorb
+// requestAnimationFrame jitter — 16.7 ms between frames at 60 Hz, and much more
+// when the browser is busy — plus a dropped frame or two, while staying short
+// enough that the sound still feels attached to the picture. 80 ms is about
+// five game frames.
+const AUDIO_LATENCY = 0.08;
+// Loud enough to hear, quiet enough not to clip when several channels sound at
+// once. Applied after scaling a channel's 0-15 level by 64.
+const AUDIO_GAIN = 0.6;
+// One-pole coefficient for the DC estimate subtracted before playback. A
+// volume-only channel is a constant offset, and feeding that to a speaker is a
+// thump on every change rather than a note. ~4 Hz at 48 kHz.
+const DC_POLE = 0.0008;
+
 // Mouse pixels to trackball counts.
 //
 // `hardware.md` lists this as UNVERIFIED: nothing establishes how a host's
@@ -168,9 +196,86 @@ async function main() {
   canvas.height = wasm.fb_height();
   const picture = context.createImageData(canvas.width, canvas.height);
 
+  // --- sound ------------------------------------------------------------
+  let audio = null; // { ctx, gain, cursor, dc }
+  let muted = false;
+  const pending = [];
+
+  // Browsers will not start an AudioContext without a gesture, so this hangs
+  // off the same click that captures the pointer. The module stays inert until
+  // sound can actually play: `set_audio` is only ever called from here.
+  const startAudio = () => {
+    if (audio) {
+      if (audio.ctx.state === 'suspended') audio.ctx.resume();
+      return;
+    }
+    const Ctor = window.AudioContext ?? window.webkitAudioContext;
+    if (!Ctor) return; // no Web Audio: the game still plays, silently
+    const ctx = new Ctor();
+    const gain = ctx.createGain();
+    gain.gain.value = muted ? 0 : 1;
+    gain.connect(ctx.destination);
+    audio = { ctx, gain, cursor: 0, dc: SOUT_MAX / 2 };
+    wasm.set_audio(1);
+  };
+
+  // Box-average the 1.25 MHz stream down to the context's rate — about 26
+  // input samples per output at 48 kHz — and centre it.
+  const resample = (input, rate) => {
+    const count = Math.max(1, Math.round((input.length * rate) / CPU_HZ));
+    const out = new Float32Array(count);
+    const step = input.length / count;
+    for (let j = 0; j < count; j++) {
+      const from = Math.floor(j * step);
+      const to = Math.min(input.length, Math.max(from + 1, Math.floor((j + 1) * step)));
+      let sum = 0;
+      for (let i = from; i < to; i++) sum += input[i];
+      const mean = sum / (to - from);
+      audio.dc += (mean - audio.dc) * DC_POLE;
+      const v = ((mean - audio.dc) / 64) * AUDIO_GAIN;
+      out[j] = v > 1 ? 1 : v < -1 ? -1 : v;
+    }
+    return out;
+  };
+
+  // Schedule everything run since the last flush as one buffer.
+  const flushAudio = () => {
+    if (!audio || pending.length === 0) return;
+    const { ctx } = audio;
+    let total = 0;
+    for (const chunk of pending) total += chunk.length;
+    const raw = new Uint8Array(total);
+    let at = 0;
+    for (const chunk of pending) {
+      raw.set(chunk, at);
+      at += chunk.length;
+    }
+    pending.length = 0;
+    if (ctx.state !== 'running') return; // suspended: drop rather than pile up
+
+    const samples = resample(raw, ctx.sampleRate);
+    const buffer = ctx.createBuffer(1, samples.length, ctx.sampleRate);
+    buffer.copyToChannel(samples, 0);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audio.gain);
+
+    // If the cursor has fallen behind the context clock — the tab was
+    // backgrounded, or MAX_CATCHUP_FRAMES dropped frames — resync it once
+    // rather than let every chunk from here on start late and stutter.
+    if (audio.cursor < ctx.currentTime) {
+      audio.cursor = ctx.currentTime + AUDIO_LATENCY;
+    }
+    source.start(audio.cursor);
+    audio.cursor += buffer.duration;
+  };
+
   // --- input ------------------------------------------------------------
 
-  canvas.addEventListener('click', () => canvas.requestPointerLock());
+  canvas.addEventListener('click', () => {
+    startAudio();
+    canvas.requestPointerLock();
+  });
 
   document.addEventListener('mousemove', (event) => {
     if (document.pointerLockElement !== canvas) return;
@@ -200,6 +305,12 @@ async function main() {
       localStorage.setItem('chill65.invertY', invertY ? '1' : '0');
       // Drop the carried remainder rather than let it push the other way.
       owedY = 0;
+      event.preventDefault();
+      return;
+    }
+    if (event.code === 'KeyM' && held) {
+      muted = !muted;
+      if (audio) audio.gain.gain.value = muted ? 0 : 1;
       event.preventDefault();
       return;
     }
@@ -243,7 +354,16 @@ async function main() {
         return;
       }
       framesThisSecond++;
+      // Drained inside the loop: `run_frame` replaces the buffer, so catching
+      // up on several frames would otherwise keep only the last one's sound.
+      // Pointer before `.buffer`, and copied, because the next frame overwrites
+      // it and any allocation would detach the view.
+      if (audio) {
+        pending.push(new Uint8Array(view(wasm, wasm.audio_ptr(), wasm.audio_len())));
+      }
     }
+
+    flushAudio();
 
     // Derived after `render_rgba`, which allocates: any view taken earlier
     // would be detached by now.
@@ -270,7 +390,8 @@ async function main() {
       `${shown} frames/sec of ${FRAME_HZ.toFixed(2)} — ` +
       `${dispatch ? 'compiled dispatch on' : 'interpreting only'} — ` +
       `trackball x${trackballScale.toFixed(2)} ([ ]), Y ${invertY ? 'inverted' : 'normal'} (Y) — ` +
-      `${document.pointerLockElement === canvas ? 'captured, Esc to release' : 'click to capture'}`,
+      `${document.pointerLockElement === canvas ? 'captured, Esc to release' : 'click to capture'} — ` +
+      `${!audio ? 'click for sound' : muted ? 'muted (M)' : 'sound on (M)'}`,
     );
   };
   requestAnimationFrame(tick);
