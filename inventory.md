@@ -838,6 +838,57 @@ structured-control-flow route at all.
    so something narrower than either rule distinguishes the two. Left for the
    census (item to come); not guessed at here.
 
+3t. **Angle brackets around a whole macro argument delimit it — 71.74% ->
+   88.83%.** MACRO-11 spells expression grouping and macro-argument grouping
+   the same way. Keeping a wrapping pair meant the body evaluated it as an
+   expression: `ASTRD2.MAC:3684` passes `DNEGATE <X,YINCL-ZSHIP>,<X,YINC>` and
+   the body does `SBC AA`, so `SBC <X,YINCL-ZSHIP>` met the index prefix where
+   an operand belonged. The macro emitted nothing, reserved the wrong width,
+   and shifted **every byte after it**: `REVYSHIP`'s body sits at `542C`, and
+   the image from there to `6D5C` — some 6,300 bytes — was misaligned by two.
+
+   Only a group spanning the entire argument is stripped; `<A>+<B>` is one
+   expression with two groups and keeps both. An existing test asserted the
+   brackets came back, which was incidental to what it names and depended on by
+   nothing — `.IF IDN` and `.IF NB` call `strip_angles` on their own operands.
+
+3u. **Census of the remaining 4,116 bytes**, by the region that owns the
+   address:
+
+   | Region | Runs | Bytes | First |
+   |---|---|---|---|
+   | absolute (`AS2ROM` + `ASTRD2`) | 304 | 2,463 | `3000` |
+   | `A2EARO` | 42 | 982 | `8941` |
+   | `XYSIG` | 11 | 382 | `8D48` |
+   | `VGUTR2` | 3 | 115 | `8ED1` |
+   | `AS2TST` | 54 | 57 | `80CF` |
+   | `ROCKDAT` | 28 | 36 | `6E8D` |
+   | everything else | 47 | 81 | — |
+
+   Two clusters account for 84% of it.
+
+   **The absolute residue is content, not placement.** Resynchronising across
+   `3000-3FFF` finds *no* shift at any offset — the bytes are simply wrong,
+   concentrated in `3500-3FFF` at roughly 230 differing per 256-byte page while
+   `3000-34FF` is nearly clean. That region is `AS2ROM`'s vector tables, built
+   from the HEAD macro and `JSRL` lists, and the gate's first difference has sat
+   at `3000` in `BOXES` since the beginning.
+
+   **The tail cluster is the 3-byte shift of item 3s**, still unexplained:
+   `A2EARO`, `XYSIG` and `VGUTR2` inherit it, and their 1,479 bytes should
+   collapse when it is resolved. The `GAME` counter-example remains the open
+   question — an explicit `.GLOBL` in the using unit overriding build-wide
+   byte-ness would explain `A2EARO` but contradicts `$CNCT` in `COIN65`, which
+   is declared the same way and which the original sized zero page. Both
+   hypotheses were tried against the gate rather than argued: per-unit `.GLOBB`
+   costs 11 points, and the override needs a per-unit declaration set that does
+   not exist yet. Not guessed at.
+
+   **Seven assembly errors remain**, none of them undefined symbols: six
+   `expression ended unexpectedly`, and `ASTRD2.MAC:5012` `expected an operand,
+   found Punct(':')` — the source there reads `PARAMS:` tab `:LDA I,0`, a label
+   whose second colon is separated from the first.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
