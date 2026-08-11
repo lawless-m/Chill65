@@ -171,6 +171,14 @@ pub struct Assembler<'a> {
     /// would then shrink the instruction from three bytes to two and shift
     /// every address after it.
     defined_here: HashSet<String>,
+    /// Every name each unit defines anywhere in it, carried from the probe.
+    ///
+    /// Whether a symbol is an import is a property of the **whole unit**, not
+    /// of how far pass one has read. `COIN65.MAC` uses `$CNCT` some forty lines
+    /// before the base-page block that defines it; consulting `defined_here` at
+    /// the point of use called it an import and sized it absolute, where the
+    /// original assembled `65 26` — zero page.
+    pub unit_defined: HashMap<String, HashSet<String>>,
     /// Current local-label region. `N$` labels are scoped between ordinary
     /// labels, so the same `10$` recurs all through the corpus.
     local_scope: u32,
@@ -274,6 +282,7 @@ impl<'a> Assembler<'a> {
             local_scope: 0,
             unit_locals: HashMap::new(),
             defined_here: HashSet::new(),
+            unit_defined: HashMap::new(),
             section: None,
             abs_loc: 0,
             sec_order: Vec::new(),
@@ -313,13 +322,17 @@ impl<'a> Assembler<'a> {
     /// no `.CSECT` anywhere, so the probe never runs there and its output cannot
     /// move.
     pub fn assemble_units(&mut self, roots: &[&str]) -> Result<BTreeMap<u16, u8>, Vec<String>> {
-        if !self.probing && self.sec_base.is_empty() {
+        // The probe runs for every build, not only those with sections: it also
+        // establishes which names each unit defines *anywhere*, which pass one
+        // cannot know as it goes.
+        if !self.probing {
             let mut probe = Assembler::new(self.provider);
             probe.probing = true;
             let _ = probe.assemble_units(roots);
             if !probe.sec_order.is_empty() {
                 self.place_sections(&probe.sec_order, &probe.sec_size);
             }
+            self.unit_defined = std::mem::take(&mut probe.unit_defined);
         }
         for pass in 1..=2 {
             // The layout is fixed; the counters that produce it are not, and
@@ -384,14 +397,31 @@ impl<'a> Assembler<'a> {
                 self.expanding.clear();
                 self.mexit = false;
                 self.local_scope = 0;
-                self.defined_here.clear();
+                // Start from what the probe found this unit defines anywhere,
+                // then keep adding as we go — the probe has nothing to say on
+                // its own first pass, and this way the set only ever grows.
+                self.defined_here = self
+                    .unit_defined
+                    .get(*root_name)
+                    .cloned()
+                    .unwrap_or_default();
                 self.locals = self
                     .unit_locals
                     .get(*root_name)
                     .cloned()
                     .unwrap_or_default();
                 self.global_decls.clear();
-                self.byte_globals.clear();
+                // `byte_globals` is deliberately NOT cleared. A `.GLOBB`
+                // declares that the symbol *is a byte*, which is a fact about
+                // the symbol rather than about the unit that mentions it, and
+                // the linker carries it across the whole program. `$CNCT` is
+                // declared `.GLOBB` in `ASTRD2.MAC` and used unprefixed by
+                // `COIN65.MAC` forty lines from any declaration of its own; the
+                // original assembles that use as `65 26`, zero page.
+                //
+                // Crystal Castles is the control and stays exact: its one
+                // `.GLOBB` names `$INTCT` and `ATRACT`, and `SN.NUM` — declared
+                // only `.GLOBL` — must stay absolute.
 
                 self.ir_unit = root_name.to_string();
 
@@ -403,6 +433,8 @@ impl<'a> Assembler<'a> {
                 self.run_source(root_name, &raw);
                 // Whatever section the unit ended in, record where it got to.
                 self.park_section();
+                self.unit_defined
+                    .insert(root_name.to_string(), self.defined_here.clone());
                 self.unit_locals
                     .insert(root_name.to_string(), self.locals.clone());
             }
@@ -3047,10 +3079,16 @@ mod tests {
         // Note B.MAC has no `.ENABL AMA`. That is the point: `VGUTR2.MAC` has
         // no `.ENABL` at all and still declares two `.GLOBB` symbols, so a rule
         // that merely widened what AMA already allows would not reach it.
+        // The control is a *second* symbol, `WORDY`, identical in every way
+        // except that nothing ever declares it `.GLOBB`. It cannot be the same
+        // symbol: byte-ness travels with the symbol across the whole link (see
+        // the per-unit reset), so `ZP` is byte-sized everywhere once any unit
+        // says so, and asking one unit to treat it as wide would be asking the
+        // linker to hold two answers at once.
         let p = provider(&[
-            ("A.MAC", "	.=0090\nZP::	.BLKB 1\n"),
-            ("B.MAC", "	.GLOBB ZP\n	.=0A000\n	LDA ZP\n"),
-            ("C.MAC", "	.GLOBL ZP\n	.=0B000\n	LDA ZP\n"),
+            ("A.MAC", "	.=0090\nZP::	.BLKB 1\nWORDY::	.BLKB 1\n"),
+            ("B.MAC", "	.GLOBB ZP\n	.GLOBL WORDY\n	.=0A000\n	LDA ZP\n	LDA WORDY\n"),
+            ("C.MAC", "	.=0B000\n	LDA ZP\n"),
         ]);
         let mut a = Assembler::new(&p);
         let img = a
@@ -3059,10 +3097,21 @@ mod tests {
 
         // Declared byte-sized: zero page, two bytes.
         assert_eq!(bytes(&img, 0xA000, 2), vec![0xA5, 0x90], "`.GLOBB` import is zero page");
-        // The control. Same symbol, same value, declared `.GLOBL` instead:
-        // absolute, three bytes. If this ever matches the line above, the
-        // directive is being treated as a synonym and proves nothing.
-        assert_eq!(bytes(&img, 0xB000, 3), vec![0xAD, 0x90, 0x00], "`.GLOBL` import stays absolute");
+        // The control. Same unit, same shape, declared `.GLOBL`: absolute. If
+        // this ever shrinks, the directive is a synonym and proves nothing.
+        assert_eq!(
+            bytes(&img, 0xA002, 3),
+            vec![0xAD, 0x91, 0x00],
+            "a `.GLOBL`-only import stays absolute"
+        );
+        // And byte-ness reaches a unit that never declared it at all — which is
+        // the case `COIN65.MAC` needs, since it uses `$CNCT` unprefixed and
+        // only `ASTRD2.MAC` says the symbol is a byte.
+        assert_eq!(
+            bytes(&img, 0xB000, 2),
+            vec![0xA5, 0x90],
+            "`.GLOBB` reaches a unit that never declared it"
+        );
     }
 
     #[test]
