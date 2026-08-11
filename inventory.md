@@ -550,9 +550,10 @@ structured-control-flow route at all.
    differing bytes, while the undefined symbols are concentrated in the
    `.GLOBB` scratch page.
 
-   `AS2FIL.MAC` and `A2GOOF.MAC` emitting **zero bytes** is unexplained and is
-   not obviously a section problem — worth its own look before the section
-   model is designed around them.
+   ~~`AS2FIL.MAC` and `A2GOOF.MAC` emitting zero bytes is unexplained.~~
+   **Withdrawn — a measurement error, see item 3p.** Both emit correctly; the
+   probe read `Assembler::image` after a clean `assemble_units`, which moves
+   the image out into the `Ok` value and leaves the field empty.
 
 3k. **`.GLOBB` implemented, and it means what the name suggests.** `.GLOBL`
    plus "and it is a byte": the symbol lives in the zero page, so a unit that
