@@ -216,24 +216,50 @@ fn substitute(line: &[Token], bind: &[(String, Vec<Token>)]) -> Vec<Token> {
         // ...4=''...5     operator then mark — the code of ...5's character
         // ```
         //
-        // A quote is a **mark** when it either touches fusable text on its left
-        // or introduces a bound parameter on its right; anything else is the
-        // operator. Space alone will not do as the test: `.BYTE ''C` separates
-        // the operator with one, and `...4=''...5` does not.
+        // A quote is a **mark for this expansion** when one of the tokens it
+        // touches is a parameter *this* expansion binds. Anything else is the
+        // operator, or a mark belonging to an expansion further in.
         //
-        // Getting this wrong fused `.BYTE` with its quote and produced a
-        // mnemonic named `.BYTE'`.
-        let fusable = |k: usize| {
-            matches!(line[k].tok, Tok::Symbol(_) | Tok::Number { .. })
+        // The adjacency alone will not do, and this is the case that proves it.
+        // `VGMC.MAC`'s ALPHA macro wraps an `.IRPC` around its parameter:
+        //
+        // ```text
+        // .MACRO ALPHA STRING
+        // .IRPC ...X,<STRING>
+        // JSRL CHAR.'...X
+        // ```
+        //
+        // When ALPHA expands, `...X` is not bound — `.IRPC` has not run yet.
+        // Treating the quote as a mark because `CHAR.` sits against it fused
+        // the pair into the literal `CHAR....X` and consumed the quote, so the
+        // `.IRPC` inside had nothing left to substitute into. Requiring a bound
+        // neighbour leaves the quote alone for the inner expansion, which does
+        // bind `...X` and joins it properly.
+        //
+        // Against the three forms that occur:
+        //
+        // ```text
+        // B'COND          mark — COND is bound on the right
+        // LABEL''X''Y     marks — X and Y are bound
+        // ...4=''...5     operator then mark — the first quote touches `=` and
+        //                 another quote, neither bound; the second touches
+        //                 `...5`, which `.IRPC` binds
+        // ```
+        //
+        // Getting this wrong in the other direction fused `.BYTE` with its
+        // quote and produced a mnemonic named `.BYTE'`; `.BYTE` is never a
+        // bound parameter, so that cannot recur.
+        let bound = |k: usize| {
+            matches!(&line[k].tok, Tok::Symbol(s) if lookup(bind, s).is_some())
         };
         let is_mark = |k: usize| {
             if !matches!(line[k].tok, Tok::Quote) {
                 return false;
             }
-            let left = k > 0 && !line[k].space_before && fusable(k - 1);
-            let right = line.get(k + 1).is_some_and(|n| {
-                !n.space_before && matches!(&n.tok, Tok::Symbol(s) if lookup(bind, s).is_some())
-            });
+            let left = k > 0 && !line[k].space_before && bound(k - 1);
+            let right = line
+                .get(k + 1)
+                .is_some_and(|n| !n.space_before && bound(k + 1));
             left || right
         };
 

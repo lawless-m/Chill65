@@ -3028,6 +3028,37 @@ mod tests {
     }
 
     #[test]
+    fn a_concatenation_mark_waits_for_the_expansion_that_binds_it() {
+        // `VGMC.MAC`'s ALPHA macro wraps an `.IRPC` around its own parameter
+        // and concatenates the loop variable: `.BYTE A.'...Q` inside
+        // `.IRPC ...Q,<STRING>` inside `.MACRO ALPHA STRING`.
+        //
+        // When ALPHA expands, `...Q` is not bound yet — `.IRPC` has not run.
+        // Consuming the quote there because `A.` sits against it fused the
+        // pair into the literal `A....Q` and left the inner `.IRPC` nothing to
+        // substitute into, which is where the 14 undefined `CHAR....X` came
+        // from. The mark belongs to whichever expansion actually binds a
+        // neighbour.
+        let src = "	.RADIX 16\nA.B = 05\nA.C = 06\n	.=0100\n\
+                   	.MACRO ALPHA STRING\n	.IRPC ...Q,<STRING>\n\
+                   	.BYTE A.'...Q\n	.ENDR\n	.ENDM\n	ALPHA ^/BC/\n";
+        let pa = provider(&[("A.MAC", src)]);
+        let mut a = Assembler::new(&pa);
+        let img = a.assemble("A.MAC").expect("assembly failed");
+        assert_eq!(bytes(&img, 0x0100, 2), vec![0x05, 0x06], "nested in a macro");
+
+        // The same body at top level already worked, and is kept as the
+        // control: a rule that fixed the nested case by never marking would
+        // break this one.
+        let bare = "	.RADIX 16\nA.B = 05\nA.C = 06\n	.=0100\n\
+                    	.IRPC ...Q,<BC>\n	.BYTE A.'...Q\n	.ENDR\n";
+        let pb = provider(&[("B.MAC", bare)]);
+        let mut b = Assembler::new(&pb);
+        let img = b.assemble("B.MAC").expect("assembly failed");
+        assert_eq!(bytes(&img, 0x0100, 2), vec![0x05, 0x06], "bare .IRPC");
+    }
+
+    #[test]
     fn a_caret_delimited_argument_keeps_its_blanks() {
         // `^/text/` is MACRO-11's delimited argument: everything between the
         // delimiters is literal, spaces included. Lexing the interior as
