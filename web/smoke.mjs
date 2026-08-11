@@ -50,6 +50,9 @@ const REQUIRED = [
   'mob_len',
   'earom_ptr',
   'earom_len',
+  'set_audio',
+  'audio_ptr',
+  'audio_len',
 ];
 
 const path = process.argv[2] ?? DEFAULT_WASM;
@@ -117,3 +120,31 @@ console.log(`${path}
   ${bytes.length} bytes, ${entries} dispatch entries
   ${FRAMES} frames, ${wasm.cycles()} cycles, hash ${hash}
   framebuffer ${wasm.fb_width()}x${wasm.fb_height()}, opaque`);
+
+// Audio last, because it runs an extra frame and everything above reports on
+// exactly FRAMES of them.
+//
+// Inert until asked for: every headless consumer of this module runs frames
+// without draining samples, so nothing may be buffered by default.
+assert.equal(wasm.audio_len(), 0, 'audio should produce nothing until enabled');
+
+wasm.set_audio(1);
+assert.equal(wasm.run_frame(), 0, 'the CPU faulted with audio on');
+// One sample per CPU cycle the frame ran: 20,480 plus the overshoot `run_frame`
+// documents, since interrupts are only checked at instruction boundaries.
+const samples = wasm.audio_len();
+assert.ok(
+  samples >= 20480 && samples <= 20486,
+  `expected a frame of samples, got ${samples}`,
+);
+// Pointer first, `.buffer` second — see the warning above. Enabling audio grows
+// linear memory, so a view built the other way round would be detached.
+const audio = view(wasm.audio_ptr(), samples);
+assert.equal(audio.length, samples);
+// SOUT is the sum of two six-bit chips, so nothing may exceed 120.
+assert.ok(audio.every((v) => v <= 120), 'SOUT out of range');
+wasm.set_audio(0);
+assert.equal(wasm.run_frame(), 0);
+assert.equal(wasm.audio_len(), 0, 'audio should stop when turned off');
+
+console.log(`  audio ${samples} samples/frame, inert by default`);

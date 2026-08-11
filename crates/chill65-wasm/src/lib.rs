@@ -164,6 +164,10 @@ pub extern "C" fn boot() -> u32 {
     }
     let mut cpu = Cpu::new();
     cpu.reset(&mut machine);
+    // Audio is a property of the embedder, not of the machine being booted, so
+    // it survives a cold boot. Otherwise a page that called `set_audio` once at
+    // start-up would fall silent the first time it reset the game.
+    machine.set_audio_enabled(s.machine.audio_enabled());
     s.machine = machine;
     s.cpu = cpu;
     s.registry = Registry::game();
@@ -236,6 +240,38 @@ pub extern "C" fn frame_hash() -> u64 {
 #[no_mangle]
 pub extern "C" fn cycles() -> u64 {
     state().machine.cycles
+}
+
+/// Produce audio, or don't. Off by default, and it survives [`boot`].
+///
+/// Every headless consumer of this module — the smoke test, the host test
+/// below, the fixtures — runs frames without ever draining samples, so nothing
+/// is buffered until something asks.
+#[no_mangle]
+pub extern "C" fn set_audio(on: u32) {
+    state().machine.set_audio_enabled(on != 0);
+}
+
+/// The most recent frame's samples: `SOUT`, one `u8` per CPU cycle.
+///
+/// **Raw, not resampled.** These are hardware samples at the CPU's 1.25 MHz —
+/// one per cycle, so roughly 20,480 per frame — with values 0-120, the sum of
+/// both POKEYs' six-bit outputs. Converting that to whatever rate the host's
+/// audio device wants is the embedder's job, exactly as persisting the EAROM
+/// is: this module has no clock and no audio device, because it must build for
+/// `wasm32-unknown-unknown`.
+///
+/// Valid until the next [`run_frame`], which overwrites the buffer. Zero-length
+/// while audio is off.
+#[no_mangle]
+pub extern "C" fn audio_ptr() -> *const u8 {
+    state().machine.audio_samples().as_ptr()
+}
+
+/// Samples available at [`audio_ptr`]; 0 while audio is off.
+#[no_mangle]
+pub extern "C" fn audio_len() -> u32 {
+    state().machine.audio_samples().len() as u32
 }
 
 #[no_mangle]
@@ -313,5 +349,29 @@ mod tests {
         };
         assert_eq!(rgba.len(), 256 * 232 * 4);
         assert!(rgba.chunks_exact(4).all(|p| p[3] == 255), "opaque");
+
+        // Audio is inert until asked for, and asking for it changes nothing
+        // observable but the samples.
+        assert_eq!(audio_len(), 0, "nobody asked for audio");
+        set_audio(1);
+        assert_eq!(boot(), 0);
+        for _ in 0..60 {
+            assert_eq!(run_frame(), 0);
+            // One sample per CPU cycle the frame ran: 20,480 plus the overshoot
+            // `run_frame` documents, since interrupts are checked at
+            // instruction boundaries.
+            assert!(
+                (20_480..20_487).contains(&audio_len()),
+                "{} samples in a frame",
+                audio_len()
+            );
+        }
+        assert_eq!(frame_hash(), first, "audio must not change the picture");
+        assert_eq!(cycles(), cycles_first, "nor the cycle count");
+
+        set_audio(0);
+        assert_eq!(boot(), 0);
+        run_frame();
+        assert_eq!(audio_len(), 0, "and it can be turned off again");
     }
 }
