@@ -3046,6 +3046,24 @@ mod tests {
     }
 
     #[test]
+    fn an_argument_wrapped_in_angle_brackets_is_unwrapped() {
+        // `ASTRD2.MAC:3684` passes indexed operands to a macro:
+        // `DNEGATE <X,YINCL-ZSHIP>,<X,YINC>`, whose body does `SBC AA`.
+        // MACRO-11 spells expression grouping with the same brackets, so
+        // keeping them made the body read `SBC <X,YINCL-ZSHIP>` and the
+        // evaluator met the index prefix where it wanted an operand — the
+        // macro emitted nothing, and every byte after it in the module shifted.
+        let src = "	.ENABL AMA\n	.RADIX 16\nYINCL = 040\nZSHIP = 014\n	.=0100\n\
+                   	.MACRO DNEGATE,AA,BB\n	SBC AA\n	STA BB\n	.ENDM\n\
+                   	DNEGATE <X,YINCL-ZSHIP>,<X,YINCL>\n";
+        let p = provider(&[("A.MAC", src)]);
+        let mut a = Assembler::new(&p);
+        let img = a.assemble("A.MAC").expect("assembly failed");
+        // SBC 2C,X then STA 40,X — both indexed, both zero page under AMA.
+        assert_eq!(bytes(&img, 0x0100, 4), vec![0xF5, 0x2C, 0x95, 0x40]);
+    }
+
+    #[test]
     fn a_globl_after_the_definition_still_exports_it() {
         // Whether a name is declared global is a fact about the unit, not about
         // how far pass one has read. `AS2DEC.MAC`'s HEAD macro writes the

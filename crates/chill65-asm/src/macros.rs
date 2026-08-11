@@ -138,6 +138,38 @@ pub fn split_args(toks: &[Token]) -> Vec<Vec<Token>> {
     if !cur.is_empty() {
         out.push(cur);
     }
+    // Angle brackets wrapping a *whole* argument delimit it; they are not part
+    // of it. MACRO-11 spells expression grouping the same way, so leaving them
+    // in place meant the body evaluated them as an expression:
+    // `DNEGATE <X,YINCL-ZSHIP>,<X,YINC>` (`ASTRD2.MAC:3684`) substituted into
+    // `SBC AA` gave `SBC <X,YINCL-ZSHIP>`, and the evaluator met the index
+    // prefix where it wanted an operand. Unwrapped, it is the indexed operand
+    // the original assembled.
+    //
+    // Only a group that spans the entire argument is stripped — `<A>+<B>` is
+    // one expression with two groups in it, and keeps both.
+    for arg in &mut out {
+        if arg.len() < 2
+            || !matches!(arg[0].tok, Tok::Punct('<'))
+            || !matches!(arg[arg.len() - 1].tok, Tok::Punct('>'))
+        {
+            continue;
+        }
+        let mut depth = 0i32;
+        let spans_all = arg.iter().enumerate().all(|(i, t)| {
+            match &t.tok {
+                Tok::Punct('<') => depth += 1,
+                Tok::Punct('>') => depth -= 1,
+                _ => {}
+            }
+            // The opening bracket may only close at the very last token.
+            depth > 0 || i == arg.len() - 1
+        });
+        if spans_all {
+            arg.remove(arg.len() - 1);
+            arg.remove(0);
+        }
+    }
     out
 }
 
@@ -417,9 +449,25 @@ mod tests {
 
     #[test]
     fn angle_brackets_group_arguments() {
+        // The brackets group; they are not part of what they group. This test
+        // previously asserted `<.A>` came back with its brackets, which was
+        // incidental to what it names and turned out to be wrong: MACRO-11
+        // spells expression grouping the same way, so a retained pair was
+        // evaluated as an expression once the argument reached a macro body.
+        //
+        // Nothing depended on the old text. `.IF IDN` and `.IF NB` call
+        // `strip_angles` on their own operands (`assemble.rs`), so they see the
+        // same thing either way.
         let a = split_args(&toks("IDN,<.A>,<.OR.>"));
-        assert_eq!(a.len(), 3);
-        assert_eq!(text(&a[1]), "<.A>");
+        assert_eq!(a.len(), 3, "the brackets still separate three arguments");
+        assert_eq!(text(&a[1]), ".A");
+        assert_eq!(text(&a[2]), ".OR.");
+
+        // A group that does not span the whole argument is an expression and
+        // keeps its brackets.
+        let b = split_args(&toks("<ZZ*2>+<DX&3>"));
+        assert_eq!(b.len(), 1);
+        assert_eq!(text(&b[0]), "<ZZ*2>+<DX&3>");
     }
 
     #[test]
