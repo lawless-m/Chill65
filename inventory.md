@@ -438,6 +438,52 @@ structured-control-flow route at all.
    cleared first, and the taxonomy re-measured, before any section work is
    contemplated.
 
+3h. **The cause of the undefined symbols: exports declared with `.GLOBL` and
+   defined with a *single* colon never reach the global table.** Not linking,
+   not sections — a symbol-visibility bug, isolated to four synthetic lines:
+
+   ```text
+   A.MAC   .GLOBL X   /  .=0090  /  X:  .BLKB 1
+   B.MAC   .GLOBL X   /  .=0A000 /  LDA X      -> undefined symbol X
+   C.MAC   .GLOBL Y   /  .=0091  /  Y:: .BLKB 1
+   D.MAC   .GLOBL Y   /  .=0A010 /  LDA Y      -> resolves
+   ```
+
+   In MACRO-11, `.GLOBL X` declares the symbol global and `X:` defines it; the
+   two together export it. `X::` is shorthand for both at once. **Our assembler
+   only honours the shorthand**, so a module that separates the declaration from
+   the definition exports nothing.
+
+   Crystal Castles writes `::` throughout, which is why this was never caught.
+   Space Duel separates them everywhere — `ASTRD2.MAC` declares its scratch page
+   with `.GLOBB` at lines 128-145 and defines it with plain `TEMP2: .BLKB 2` at
+   277 — so almost every cross-module symbol it publishes is invisible.
+
+   Evidence that this is the bulk of the remaining 1,038: of the twenty most
+   frequent undefined names, **every one is defined, in a module that is in the
+   fifteen** — `VGADD2`, `VGVTR5`, `VGCNTR` and `VGHEX` in VGUTR2; `MESGPOS` in
+   AS2MSG; `TEMP1`-`TEMP9`, `TEMPA`, `TEMPC`, `VGLIST`, `HSCORE`, `ONTIME`,
+   `EABUF` and `INITL` in ASTRD2. Category (a), defined nowhere, has exactly one
+   member — `CHAR....X`, whose name has the shape of a macro concatenation
+   artefact and which is a separate question. Category (b), orphaned by a
+   failing module, is not needed to explain anything.
+
+   This also explains why implementing `.GLOBB` alone changed nothing (item
+   3g): adding a name to the declaration set cannot help when the *definition*
+   never publishes it.
+
+   **The fix, and its risk.** Export a symbol when it is defined and its name
+   has been declared `.GLOBL`/`.GLOBB` in the same unit, not only when written
+   `::`. The risk is that Crystal Castles may contain `.GLOBL`-declared,
+   single-colon symbols that are currently private and would become visible,
+   changing its import sizing — `globl_declared_externals_size_absolute` in
+   assemble.rs turns on exactly that distinction. Its gate is the guard and must
+   stay at DATA 16384/16384 and PROGRAM 24576/24576.
+
+   With that fixed, `.GLOBB`'s byte-sizing (item 3g) becomes worth revisiting,
+   since the two interact: `.GLOBB` says an import is zero-page, and until
+   exports work there are no imports to size.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
