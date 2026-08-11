@@ -330,6 +330,36 @@ impl Lexer {
                 continue;
             }
 
+            // `^/text/` — MACRO-11's delimited argument. The character after
+            // the caret is the delimiter and everything up to its next
+            // occurrence is literal text, **spaces included**. Space Duel
+            // passes blank-padded strings this way, `ASCIN ^/  RECORDS  /`,
+            // and lexing the interior as ordinary tokens threw the padding
+            // away: whitespace survives a token stream only as a
+            // `space_before` flag, so `  R  ` came back as ` R` and `.NCHR`
+            // counted two characters instead of five.
+            //
+            // The delimiter must be non-alphanumeric, which is what separates
+            // this from the `^H`/`^D`/`^B`/`^O` radix overrides handled below.
+            // Crystal Castles contains exactly one non-radix caret and its
+            // delimiter would be alphanumeric, so that corpus cannot reach
+            // this branch.
+            if c == '^' && i + 1 < b.len() && !b[i + 1].is_ascii_alphanumeric() {
+                let delim = b[i + 1];
+                let start = i + 2;
+                let mut j = start;
+                while j < b.len() && b[j] != delim {
+                    j += 1;
+                }
+                out.push(Token {
+                    tok: Tok::Str(b[start..j].iter().collect()),
+                    span: span(i),
+                    space_before: gap,
+                });
+                i = if j < b.len() { j + 1 } else { j };
+                continue;
+            }
+
             // Comment runs to end of line and is kept whole.
             if c == ';' {
                 let text: String = b[i + 1..].iter().collect();

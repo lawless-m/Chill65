@@ -330,6 +330,10 @@ fn tok_text_of(t: &Tok) -> String {
         // Prefixes render with their comma, as written: `LDA I,FROM`.
         Tok::Prefix(m) => format!("{m:?},").to_uppercase(),
         Tok::Quote => "'".into(),
+        // A delimited string is its contents, spaces and all. `.NCHR` counts
+        // those characters and `.IRPC` iterates them, so rendering it empty
+        // silently dropped every blank-padded macro argument.
+        Tok::Str(s) => s.clone(),
         _ => String::new(),
     }
 }

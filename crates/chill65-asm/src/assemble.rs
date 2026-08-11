@@ -3028,6 +3028,34 @@ mod tests {
     }
 
     #[test]
+    fn a_caret_delimited_argument_keeps_its_blanks() {
+        // `^/text/` is MACRO-11's delimited argument: everything between the
+        // delimiters is literal, spaces included. Lexing the interior as
+        // ordinary tokens threw the padding away — whitespace survives a token
+        // stream only as a `space_before` flag — so `^/  R  /` reached `.NCHR`
+        // as ` R` and counted two characters instead of five.
+        //
+        // `AS2MSG.MAC` pads every message this way, `ASCIN ^/  RECORDS  /`.
+        let p = provider(&[(
+            "A.MAC",
+            "	.=0100\n	.MACRO CNT STRING\n	.NCHR ..C,<STRING>\n	.BYTE ..C\n\
+             	.IRPC ..5,<STRING>\n	.BYTE 055\n	.ENDR\n	.ENDM\n\
+             	CNT ^/AB C/\n	CNT ^/  R  /\n",
+        )]);
+        let mut a = Assembler::new(&p);
+        let img = a.assemble("A.MAC").expect("assembly failed");
+
+        // Four interior characters, four iterations — this already worked, and
+        // is here so a fix that over-corrects by padding is caught too.
+        assert_eq!(bytes(&img, 0x0100, 5), vec![0x04, 0x55, 0x55, 0x55, 0x55]);
+        // Two leading and two trailing blanks around one letter: five.
+        assert_eq!(
+            bytes(&img, 0x0105, 6),
+            vec![0x05, 0x55, 0x55, 0x55, 0x55, 0x55]
+        );
+    }
+
+    #[test]
     fn vctrs_writes_the_absolute_counter_not_the_section_one() {
         // `.VCTRS ADDR,...` names an absolute address, so it must set the
         // absolute counter. Setting the open section's counter instead made
