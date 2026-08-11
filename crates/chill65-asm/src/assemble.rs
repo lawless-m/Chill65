@@ -1311,6 +1311,19 @@ impl<'a> Assembler<'a> {
             Dir::Vctrs => {
                 let fields = split_commas(args);
                 if let Some(addr) = fields.first().and_then(|f| self.eval_here(f)) {
+                    // The address is absolute, so the counter it sets must be
+                    // the absolute one. Writing it into a section's counter
+                    // left the section apparently stretching from its base up
+                    // to the vectors: `AS2TST.MAC` ends with
+                    // `.VCTRS 8FFA,...` while still inside `.CSECT AS2TST`,
+                    // and the section measured `0x9000 - base` instead of its
+                    // real content.
+                    //
+                    // Crystal Castles is unaffected — `CRF.MAC:77` does the
+                    // same thing with no section open anywhere in the corpus,
+                    // where parking the absolute counter and restoring it is a
+                    // no-op.
+                    self.enter_section(None);
                     self.loc = addr;
                     for f in &fields[1..] {
                         let v = self.eval_here(f).unwrap_or(0);
@@ -3012,6 +3025,35 @@ mod tests {
         assert_eq!(img.get(&0x0202), Some(&0x00), "B's PRIV is B's");
         // And a private name never leaks into the shared table.
         assert!(!a.globals.contains_key("PRIV"));
+    }
+
+    #[test]
+    fn vctrs_writes_the_absolute_counter_not_the_section_one() {
+        // `.VCTRS ADDR,...` names an absolute address, so it must set the
+        // absolute counter. Setting the open section's counter instead made
+        // the section look as though it ran from its base all the way up to
+        // the vectors — `AS2TST.MAC` ends with `.VCTRS 8FFA,...` inside its
+        // `.CSECT`, and its size came out as the distance to `0x9000` rather
+        // than the 0x60D bytes it actually holds.
+        let p = provider(&[(
+            "A.MAC",
+            "	.CSECT S\n	.BYTE 011,022,033\nSYM1::	.BYTE 044\n\
+             SYM2 = 01234\n	.VCTRS 0FFA0,SYM1,SYM2\n",
+        )]);
+        let mut a = Assembler::new(&p);
+        let img = a.assemble("A.MAC").expect("assembly failed");
+
+        // Four bytes went into the section, and only those four.
+        assert_eq!(a.sec_size["S"], 4, "the vectors must not stretch the section");
+        let base = a.sec_base["S"];
+        assert_eq!(bytes(&img, base, 4), vec![0x11, 0x22, 0x33, 0x44]);
+
+        // The words landed at the absolute address, little-endian.
+        let sym1 = base + 3;
+        assert_eq!(
+            bytes(&img, 0xFFA0, 4),
+            vec![(sym1 & 0xFF) as u8, (sym1 >> 8) as u8, 0x34, 0x12]
+        );
     }
 
     #[test]
