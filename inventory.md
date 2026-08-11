@@ -554,6 +554,73 @@ structured-control-flow route at all.
    not obviously a section problem — worth its own look before the section
    model is designed around them.
 
+3k. **`.GLOBB` implemented, and it means what the name suggests.** `.GLOBL`
+   plus "and it is a byte": the symbol lives in the zero page, so a unit that
+   references it without defining it sizes the operand short even though it
+   cannot see the value. The *declaration* carries the size, which is the only
+   reason to write `.GLOBB` rather than `.GLOBL`.
+
+   **Why the earlier attempt (3g) failed.** It set `size_value = Some(0)` and
+   left the rest alone. But `resolve_mode`'s `zp_ok` reads
+   `ama && value < 0x100` — AMA here is "auto memory addressing", and *without*
+   it every operand is absolute whatever its value. `VGUTR2.MAC` has no
+   `.ENABL` at all and two `.GLOBB` declarations, so a rule that only widens
+   what AMA already permits cannot reach it. `zp_ok` now takes a second,
+   independent route: `byte_sized || (ama && …)`.
+
+   | Baseline | Errors | Undefined | Distinct |
+   |---|---|---|---|
+   | ASTRD2 root | 1,895 | 1,038 | 271 |
+   | Single-colon exports (3i) | 731 | 385 | 80 |
+   | **`.GLOBB`** | **69** | **54** | **39** |
+
+   Most of that drop is the *declaration* half, not the sizing half: `.GLOBB`
+   now enters `global_decls`, so 3i's export rule reaches the scratch page it
+   declares. The two changes only work together, which is why neither moved the
+   count alone.
+
+   Crystal Castles is unchanged (16384/16384, 24576/24576). Its single
+   `.GLOBB`, at `CRP.MAC:56`, was previously producing the right bytes for the
+   wrong reason — the directive was unrecognised, so the names never became
+   imports and AMA sized them zero page from their values. Now they are imports
+   declared byte-sized and take the same `a5 a3` for the reason the original
+   assembler had. `globl_declared_externals_size_absolute` still passes and is
+   the control: same symbol, same value, `.GLOBL` instead of `.GLOBB`, still
+   absolute.
+
+   What remains of the 69: `CHAR....X` (14, defined nowhere, name shaped like a
+   macro concatenation artefact), a scatter of `WNDSE*`/`BOX*` singletons, and
+   the 11 parse anomalies at `ASTRD2.MAC:3685` and `:5012` already recorded.
+
+3l. **The link model, measured: named sections concatenate in link order.**
+   With operand widths correct, each relocatable module can be assembled alone
+   and located in `ASTRD2.LDA` by searching for its longest byte runs. Before
+   `.GLOBB` this drifted — `AST2RT`'s two runs implied bases one byte apart,
+   which is exactly an operand emitted absolute where the original emitted zero
+   page. Now the anchors agree with themselves:
+
+   | Module (link order) | Implied base | Agreeing runs |
+   |---|---|---|
+   | `AS2ROM` | `3000` (`.ASECT`) | absolute |
+   | `ASTRD2` | `2800`, `4000`+ (`.ASECT`) | absolute |
+   | `AST2RT` | `6EE5` | 2, still 3 bytes apart |
+   | `AS2SAC` | `703C` | 2 |
+   | `AS2POK` | `70C0` | 2 |
+   | `AS2COI` | `741A` | 2 |
+   | `AS2MSG` | `7730` | 1 |
+   | `AS2TST` | `7FAB` | 1 |
+   | `A2IRQ` | `8639` | **4** |
+   | `VGUTR2` | `8E42` | 1 |
+
+   **The bases rise monotonically in `SDGEN1.COM`'s link order.** That is
+   concatenation, and it is measured rather than assumed — `A2IRQ` alone has
+   four independent runs agreeing on one base. `A2NAME`, `A2EARO` and `XYSIG`
+   did not anchor; `AS2FIL` and `A2GOOF` still emit nothing at all (item 3j).
+
+   `AST2RT`'s two runs remain 3 bytes apart, so something inside that module
+   still sizes differently from the original. That is a real remaining
+   difference and should be run down rather than absorbed into a base guess.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 

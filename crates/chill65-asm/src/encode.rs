@@ -160,8 +160,12 @@ pub fn resolve_mode(
     has_operand: bool,
     operand: Option<u16>,
     ama: bool,
+    byte_sized: bool,
 ) -> Result<Mode, EncodeError> {
-    let zp_ok = |v: Option<u16>| ama && v.is_some_and(|v| v < 0x100);
+    // Two independent routes to a short operand. AMA sizes from the *value*, so
+    // it needs one; `.GLOBB` sizes from the *declaration*, which is what lets an
+    // import whose value this unit cannot see still take a zero-page operand.
+    let zp_ok = |v: Option<u16>| byte_sized || (ama && v.is_some_and(|v| v < 0x100));
 
     let mode = match written {
         // Explicitly written modes pass straight through.
@@ -323,19 +327,19 @@ mod tests {
     #[test]
     fn ama_decides_zero_page_versus_absolute() {
         // With AMA on, an operand below 0x100 takes the zero-page form.
-        let m = resolve_mode("LDA", None, true, Some(0x04), true).unwrap();
+        let m = resolve_mode("LDA", None, true, Some(0x04), true, false).unwrap();
         assert_eq!(m, Mode::Z);
         assert_eq!(size_of(m), 2);
         assert_eq!(enc("LDA", m, Some(0x04)), vec![0xA5, 0x04]);
 
         // With AMA off it stays absolute — three bytes, moving everything after.
-        let m = resolve_mode("LDA", None, true, Some(0x04), false).unwrap();
+        let m = resolve_mode("LDA", None, true, Some(0x04), false, false).unwrap();
         assert_eq!(m, Mode::A);
         assert_eq!(size_of(m), 3);
         assert_eq!(enc("LDA", m, Some(0x04)), vec![0xAD, 0x04, 0x00]);
 
         // Above the zero page, AMA makes no difference.
-        assert_eq!(resolve_mode("LDA", None, true, Some(0x9E87), true).unwrap(), Mode::A);
+        assert_eq!(resolve_mode("LDA", None, true, Some(0x9E87), true, false).unwrap(), Mode::A);
     }
 
     #[test]
@@ -344,25 +348,25 @@ mod tests {
         // operand is plainly there — treating None as "no operand" made
         // `BNE FORWARD` look operandless and picked an illegal mode.
         assert_eq!(
-            resolve_mode("BNE", None, true, None, false).unwrap(),
+            resolve_mode("BNE", None, true, None, false, false).unwrap(),
             Mode::S
         );
-        assert_eq!(resolve_mode("LDA", None, true, None, true).unwrap(), Mode::A);
+        assert_eq!(resolve_mode("LDA", None, true, None, true, false).unwrap(), Mode::A);
         // Genuinely operandless still works.
-        assert_eq!(resolve_mode("RTS", None, false, None, false).unwrap(), Mode::Ac);
-        assert!(resolve_mode("LDA", None, false, None, false).is_err());
+        assert_eq!(resolve_mode("RTS", None, false, None, false, false).unwrap(), Mode::Ac);
+        assert!(resolve_mode("LDA", None, false, None, false, false).is_err());
     }
 
     #[test]
     fn auto_sizing_x_and_y_prefixes() {
         // LDA X,VITAB — zero page when AMA allows, absolute otherwise.
-        assert_eq!(resolve_mode("LDA", Some(Mode::X), true, Some(0x30), true).unwrap(), Mode::Zx);
-        assert_eq!(resolve_mode("LDA", Some(Mode::X), true, Some(0x8030), true).unwrap(), Mode::Ax);
-        assert_eq!(resolve_mode("LDA", Some(Mode::X), true, Some(0x30), false).unwrap(), Mode::Ax);
+        assert_eq!(resolve_mode("LDA", Some(Mode::X), true, Some(0x30), true, false).unwrap(), Mode::Zx);
+        assert_eq!(resolve_mode("LDA", Some(Mode::X), true, Some(0x8030), true, false).unwrap(), Mode::Ax);
+        assert_eq!(resolve_mode("LDA", Some(Mode::X), true, Some(0x30), false, false).unwrap(), Mode::Ax);
         // LDX has no zp,X — only zp,Y — so Y auto-sizes to Zy.
-        assert_eq!(resolve_mode("LDX", Some(Mode::Y), true, Some(0x30), true).unwrap(), Mode::Zy);
+        assert_eq!(resolve_mode("LDX", Some(Mode::Y), true, Some(0x30), true, false).unwrap(), Mode::Zy);
         // LDA has no zp,Y, so Y must land on absolute,Y.
-        assert_eq!(resolve_mode("LDA", Some(Mode::Y), true, Some(0x30), true).unwrap(), Mode::Ay);
+        assert_eq!(resolve_mode("LDA", Some(Mode::Y), true, Some(0x30), true, false).unwrap(), Mode::Ay);
     }
 
     #[test]

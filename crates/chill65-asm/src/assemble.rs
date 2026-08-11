@@ -85,6 +85,13 @@ pub struct Assembler<'a> {
     /// whole build, which is what lets `CRF` reference `RS.KEY::` from `CRP`.
     pub globals: HashMap<String, u16>,
     pub global_decls: HashSet<String>,
+    /// The subset of `global_decls` written `.GLOBB` rather than `.GLOBL`.
+    ///
+    /// `.GLOBB` says the symbol is byte-sized — it lives in the zero page — so
+    /// a unit that references it without defining it can size the operand short
+    /// even though it cannot see the value. That is the whole point of the
+    /// directive, and it is why it is not a synonym for `.GLOBL`.
+    pub byte_globals: HashSet<String>,
     pub image: BTreeMap<u16, u8>,
     loc: u16,
     radix: u32,
@@ -178,6 +185,7 @@ impl<'a> Assembler<'a> {
             locals: HashMap::new(),
             globals: HashMap::new(),
             global_decls: HashSet::new(),
+            byte_globals: HashSet::new(),
             image: BTreeMap::new(),
             loc: 0,
             radix: 16,
@@ -276,6 +284,7 @@ impl<'a> Assembler<'a> {
                     .cloned()
                     .unwrap_or_default();
                 self.global_decls.clear();
+                self.byte_globals.clear();
 
                 self.ir_unit = root_name.to_string();
 
@@ -636,9 +645,30 @@ impl<'a> Assembler<'a> {
         });
         let size_value = if external { None } else { value };
 
+        // ...unless the declaration was `.GLOBB`, which says the import is
+        // byte-sized. Then the unit *can* size it short without seeing the
+        // value, and that is the only reason to write `.GLOBB` instead of
+        // `.GLOBL`. It is independent of AMA: `VGUTR2.MAC` has no `.ENABL` at
+        // all and two `.GLOBB` declarations, so a rule that only widened what
+        // AMA already permits would do nothing there.
+        let byte_external = rest.iter().any(|t| match &t.tok {
+            Tok::Symbol(n) => {
+                let k = intern(n);
+                self.byte_globals.contains(&k) && !self.defined_here.contains(&k)
+            }
+            _ => false,
+        });
+
         // Choose the mode once, in pass one, and replay it in pass two.
         let mode = if self.pass == 1 {
-            match encode::resolve_mode(mnemonic, written, has_operand, size_value, self.ama) {
+            match encode::resolve_mode(
+                mnemonic,
+                written,
+                has_operand,
+                size_value,
+                self.ama,
+                byte_external,
+            ) {
                 Ok(m) => m,
                 Err(e) => {
                     self.errors.push(format!("{site}: {mnemonic}: {e}"));
@@ -1038,7 +1068,7 @@ impl<'a> Assembler<'a> {
                 }
             }
 
-            Dir::Globl => {
+            Dir::Globl | Dir::Globb => {
                 // Both passes. `define` consults this set, and a `NAME = expr`
                 // definition runs in both passes — collecting declarations in
                 // pass one alone would file such a symbol as shared on the way
@@ -1046,6 +1076,9 @@ impl<'a> Assembler<'a> {
                 for f in split_commas(args) {
                     if let Some(Tok::Symbol(s)) = f.first().map(|t| &t.tok) {
                         self.global_decls.insert(intern(s));
+                        if d == Dir::Globb {
+                            self.byte_globals.insert(intern(s));
+                        }
                     }
                 }
             }
@@ -2746,6 +2779,34 @@ mod tests {
         assert_eq!(img.get(&0x0202), Some(&0x00), "B's PRIV is B's");
         // And a private name never leaks into the shared table.
         assert!(!a.globals.contains_key("PRIV"));
+    }
+
+    #[test]
+    fn globb_declared_externals_size_zero_page() {
+        // `.GLOBB` is `.GLOBL` plus "and it is a byte". The value lives in
+        // another unit, so this one cannot see it — the *declaration* is what
+        // says the operand is short. Space Duel writes 42 of these across ten
+        // modules for the shared scratch page.
+        //
+        // Note B.MAC has no `.ENABL AMA`. That is the point: `VGUTR2.MAC` has
+        // no `.ENABL` at all and still declares two `.GLOBB` symbols, so a rule
+        // that merely widened what AMA already allows would not reach it.
+        let p = provider(&[
+            ("A.MAC", "	.=0090\nZP::	.BLKB 1\n"),
+            ("B.MAC", "	.GLOBB ZP\n	.=0A000\n	LDA ZP\n"),
+            ("C.MAC", "	.GLOBL ZP\n	.=0B000\n	LDA ZP\n"),
+        ]);
+        let mut a = Assembler::new(&p);
+        let img = a
+            .assemble_units(&["A.MAC", "B.MAC", "C.MAC"])
+            .expect("assembly failed");
+
+        // Declared byte-sized: zero page, two bytes.
+        assert_eq!(bytes(&img, 0xA000, 2), vec![0xA5, 0x90], "`.GLOBB` import is zero page");
+        // The control. Same symbol, same value, declared `.GLOBL` instead:
+        // absolute, three bytes. If this ever matches the line above, the
+        // directive is being treated as a synonym and proves nothing.
+        assert_eq!(bytes(&img, 0xB000, 3), vec![0xAD, 0x90, 0x00], "`.GLOBL` import stays absolute");
     }
 
     #[test]

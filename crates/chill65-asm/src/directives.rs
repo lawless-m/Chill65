@@ -47,6 +47,9 @@ pub enum Dir {
     Endr,
     Error,
     Globl,
+    /// `.GLOBB` — like `.GLOBL`, but the symbol is byte-sized, so a reference
+    /// to it from a unit that does not define it takes a zero-page operand.
+    Globb,
     Enabl,
     Dsabl,
     Nocross,
@@ -94,6 +97,7 @@ pub fn classify(name: &str) -> Option<Dir> {
         ".ENDR" => Dir::Endr,
         ".ERROR" => Dir::Error,
         ".GLOBL" => Dir::Globl,
+        ".GLOBB" => Dir::Globb,
         ".ENABL" | ".ENABLE" => Dir::Enabl,
         ".DSABL" | ".DISABLE" => Dir::Dsabl,
         ".NOCROSS" | ".CROSS" => Dir::Nocross,
