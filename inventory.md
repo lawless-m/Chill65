@@ -135,7 +135,27 @@ HLL package**, so it would exercise the relooper path hard.
 macros. Its contents reveal it was built on Asteroids Deluxe (`AST2RD.MAC`,
 `ASTRD2.MAC`, `A2*.MAC`). The plan's caution that it may be corrupt is **not
 corroborated by the file listing**, but file listings cannot detect corruption —
-this needs a content check before relying on it. On tree evidence it is the
+this needs a content check before relying on it.
+
+> **Content check done, 2026-08-11: no corruption found.** Every test was run
+> against `crystal-castles` as a control, since that tree is known good — we
+> assemble it byte-identically.
+>
+> - No empty files. No NUL bytes anywhere in content: all 6,523 of them are
+>   trailing pad, and **every one of the 26 `.MAC` files is an exact 512-byte
+>   multiple**. That is RT-11 block structure preserved intact, and
+>   `crystal-castles` has exactly the same property (8,907 pad bytes, 96 of 96
+>   files block-aligned). A damaged dump would not keep that.
+> - 22 of 26 `.MAC` files end in `.END`.
+> - All three `.INCLUDE` targets — `AS2DEC`, `HLL65F`, `VGMC` — resolve inside
+>   the tree.
+> - The 160 KB root `AST2RD.MAC` parses. Symbol names come out clean, and
+>   HLL65F **expands** — the generated `~L311$100`-form labels appear in the
+>   error output, which they could not if the macro package were damaged.
+>
+> Assembling it reports 3,379 errors, and **none of them indicate damage**: only
+> 8 are parse anomalies, the rest are undefined symbols and their cascade. The
+> cause is structural rather than textual — see below. On tree evidence it is the
 strongest candidate for the plan's Phase 6 vector title: it has both the HLL
 package (so the structured path applies) and `.LDA` oracles.
 
@@ -161,6 +181,22 @@ structured-control-flow route at all.
    Widow both have HLL65F plus the shared vector macros. Black Widow's `VGMC16`/
    `VGUT16` differ from the `VGMC`/`VGUT` used by four other titles, so Space Duel
    sits on the more reusable branch.
+3a. **Space Duel is multi-module and linked; Crystal Castles was not.** Found
+   while content-checking (above), and it is the largest single piece of Phase 6
+   work nobody had costed. `A2IRQ.MAC` opens with `.CSECT` and `.GLOBL`, and the
+   symbols it reports undefined — `IANGLE`, `GTIME`, `TEMP4`, `INTRPT` — are not
+   in `AS2DEC` or any file it includes. They are resolved **at link time**. So
+   the undefined-symbol errors are correct behaviour for assembling one module
+   of a linked program in isolation, not a defect in the source and not a
+   dialect gap.
+
+   Crystal Castles assembles as a single root file that includes everything, so
+   `chill65-asm` never needed a linker and does not have one. Space Duel needs
+   either LINKM's semantics implemented, or the modules concatenated in the
+   right order with globals resolved — a decision to make deliberately rather
+   than discover. This raises the priority of §7.4's advice to read the LINKM
+   sources from "before deciding O1" to "before starting Phase 6".
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
