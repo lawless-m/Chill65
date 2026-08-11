@@ -676,6 +676,49 @@ structured-control-flow route at all.
    Also still open from 3j: `AS2FIL` and `A2GOOF` emit **zero bytes**, and
    `AST2RT`'s two anchors remain 3 bytes apart.
 
+3o. **The blank-section rule confirmed, and the remaining work is section
+   sizes.** 3n's hypothesis holds: a unit begins in the blank section, not the
+   absolute one. `AS2COI.MAC` and `A2GOOF.MAC` declare no section anywhere, and
+   the oracle puts `AS2COI` at `741A` — exactly where `AS2POK` ends. Crystal
+   Castles is unaffected because every root declares `.ASECT` before emitting
+   anything.
+
+   That also forced a second rule: **a section joins the layout when content
+   lands in it**, not when a directive naming it goes by. Every unit now starts
+   in the blank section, so registering on entry would put the blank one first
+   in every build.
+
+   The gate moves **56.37% → 57.99%**, and the first difference leaves `0000`
+   altogether — nothing is piled at zero any more.
+
+   **Three bases are now exact**, and the errors past them are size errors, not
+   placement errors:
+
+   | Section | Our base | Anchor | Out by |
+   |---|---|---|---|
+   | `AST2RT` | `6EE5` | `6EE5` | **0** |
+   | `AS2SAC` | `703C` | `703C` | **0** |
+   | `AS2POK` | `70C0` | `70C0` | **0** |
+   | `~blank` | `741A` | `741A` (as `AS2COI`) | **0** |
+   | `AS2MSG` | `774B` | `7730` | +`1B` |
+   | `AS2TST` | `7D9F` | `7FAB` | −`20C` |
+   | `AS2IRQ` | `8D9F` | `8639` | +`766` |
+   | `VGUTR2` | `95A8` | `8E42` | +`766` |
+
+   Read down the column: the layout is right through `~blank`, then `A2NAME` is
+   **27 bytes too large**, `A2FILL` or `AS2MSG` is **~0x227 too small**, and
+   `AS2TST` is **~0x972 too large**. `AS2IRQ` and `VGUTR2` are out by the same
+   `766`, which says nothing new goes wrong between them — the error is fully
+   accumulated by `AS2IRQ`.
+
+   **Remaining gate state: 21,377 of 36,864 (57.99%), 724 differing runs**,
+   nearly all one or two bytes at operand positions — addresses pointing into
+   sections whose bases are still off. That is the expected shape when sizes
+   are wrong and placement is right, and it is the next piece of work: run down
+   `A2NAME`, `A2FILL`/`AS2MSG` and `AS2TST` one at a time, each against its own
+   anchor. Also still open: `AS2FIL` and `A2GOOF` emit zero bytes (3j), and
+   `AST2RT`'s two anchors sit 3 bytes apart (3l).
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
