@@ -484,6 +484,37 @@ structured-control-flow route at all.
    since the two interact: `.GLOBB` says an import is zero-page, and until
    exports work there are no imports to size.
 
+3i. **Fixed, and it was the bulk of it.** A symbol is now exported when it is
+   defined *and* its name has been declared `.GLOBL`/`.GLOBB` in the same unit,
+   not only when written `::` (`assemble.rs`, `define`). `.GLOBL` declarations
+   are collected on both passes rather than pass one alone, because a
+   `NAME = expr` definition runs on both and would otherwise be filed shared on
+   the way through and private on the way back.
+
+   | Baseline | Errors | Undefined | Distinct |
+   |---|---|---|---|
+   | Original, AST2RD root | 7,805 | 5,426 | 285 |
+   | After `.IRP`/`.IRPC`/`.NCHR`/char-value | 4,925 | 2,546 | — |
+   | ASTRD2 root | 1,895 | 1,038 | 271 |
+   | **Single-colon exports** | **731** | **385** | **80** |
+
+   **The predicted risk did not materialise.** Crystal Castles is unchanged —
+   DATA 16384/16384 and PROGRAM 24576/24576, and
+   `globl_declared_externals_size_absolute` still passes, because the import
+   sizing turns on the *declaration* and `defined_here`, neither of which this
+   touches. Space Duel's A2SHIP gate holds at 2048/2048.
+
+   What is left is now dominated by `.GLOBB`, and cleanly: `TEMP2` (43),
+   `VGLIST` (36), `TEMP1` (28), `TEMP7` (24), `TEMPA` (23) — the scratch page
+   `ASTRD2.MAC:128-145` declares with `.GLOBB`, which the assembler still does
+   not know, so those names never enter the declaration set and the fix above
+   cannot reach them. Item 3g's directive is the next piece and its effect is
+   now predictable rather than speculative. `CHAR....X` (14) remains the one
+   name defined nowhere.
+
+   **Sections are still not implicated.** Four rounds of triage and not one
+   error yet attributes to them.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 

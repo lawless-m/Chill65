@@ -1039,11 +1039,13 @@ impl<'a> Assembler<'a> {
             }
 
             Dir::Globl => {
-                if self.pass == 1 {
-                    for f in split_commas(args) {
-                        if let Some(Tok::Symbol(s)) = f.first().map(|t| &t.tok) {
-                            self.global_decls.insert(intern(s));
-                        }
+                // Both passes. `define` consults this set, and a `NAME = expr`
+                // definition runs in both passes — collecting declarations in
+                // pass one alone would file such a symbol as shared on the way
+                // through and private on the way back.
+                for f in split_commas(args) {
+                    if let Some(Tok::Symbol(s)) = f.first().map(|t| &t.tok) {
+                        self.global_decls.insert(intern(s));
                     }
                 }
             }
@@ -1411,10 +1413,20 @@ impl<'a> Assembler<'a> {
     /// `NAME:` and `NAME=` are private to the unit; `NAME::` and `NAME==` are
     /// shared. The distinction is already carried on the token — it is the
     /// source's own scoping rule, not one we invent.
+    ///
+    /// A declaration shares a symbol too. In MACRO-11 it is the *pair* —
+    /// `.GLOBL X` somewhere in the unit and a definition of `X` in the same
+    /// unit — that exports it; `X::` is shorthand for writing both at once.
+    /// Crystal Castles only ever uses the shorthand, so honouring it alone was
+    /// enough for four years. Space Duel separates them everywhere:
+    /// `ASTRD2.MAC` declares its scratch page with `.GLOBB` at the top of the
+    /// file and defines it a couple of hundred lines later as plain
+    /// `TEMP2: .BLKB 2`, so under the shorthand-only rule almost nothing it
+    /// publishes reached the other fourteen modules.
     fn define(&mut self, name: &str, value: u16, global: bool) {
         let key = intern(name);
         self.defined_here.insert(key.clone());
-        if global {
+        if global || self.global_decls.contains(&key) {
             self.globals.insert(key, value);
         } else {
             self.locals.insert(key, value);
@@ -2734,6 +2746,29 @@ mod tests {
         assert_eq!(img.get(&0x0202), Some(&0x00), "B's PRIV is B's");
         // And a private name never leaks into the shared table.
         assert!(!a.globals.contains_key("PRIV"));
+    }
+
+    #[test]
+    fn a_globl_declaration_exports_a_single_colon_definition() {
+        // `.GLOBL X` plus `X:` is the long form of `X::`. Crystal Castles only
+        // ever writes the shorthand, so honouring the shorthand alone passed
+        // its gate for years; Space Duel separates the two everywhere, and
+        // under the old rule `ASTRD2.MAC` published almost nothing to the
+        // fourteen modules that import from it.
+        //
+        // The control is `PRIV`, defined identically but never declared: it
+        // must stay private, or the test is only showing that everything is
+        // global now.
+        let p = provider(&[
+            ("A.MAC", "	.GLOBL DECL\n	.=0100\nDECL:	.BLKB 1\nPRIV:	.BLKB 1\n"),
+            ("B.MAC", "	.=0200\n	.BYTE DECL\n"),
+        ]);
+        let mut a = Assembler::new(&p);
+        let img = a.assemble_units(&["A.MAC", "B.MAC"]).expect("assembly failed");
+
+        assert_eq!(a.globals.get("DECL"), Some(&0x0100), "declared and defined -> exported");
+        assert!(!a.globals.contains_key("PRIV"), "an undeclared `NAME:` stays private");
+        assert_eq!(img.get(&0x0200), Some(&0x00), "the other unit resolves it");
     }
 
     /// Module scoping against the real corpus.
