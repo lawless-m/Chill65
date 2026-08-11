@@ -197,6 +197,82 @@ structured-control-flow route at all.
    than discover. This raises the priority of §7.4's advice to read the LINKM
    sources from "before deciding O1" to "before starting Phase 6".
 
+3b. **The build recipe, and which oracle is which.** `space-duel/SDGEN1.COM` is
+   the original RT-11 build script and survives intact (read it with the NULs
+   stripped). MAC65 assembles 16 modules separately, then LINKM links them:
+
+   ```
+   VX0:AST2RD/L,VX0:A2LINK=VX0:AS2ROM,AST2RD,AST2RT,AS2SAC,AS2POK,AS2COI/C
+   VX0:A2NAME,AS2MSG,AS2FIL,AS2TST,A2IRQ,A2EARO/C
+   VX0:XYSIG,VGUTR2,A2GOOF
+   VX0:A2SHIP/L=VX0:A2SHIP
+   ```
+
+   The script even prints `LINK COMPLETED, OUTPUT = 'VX0:AST2RD.LDA'`. So
+   **`AST2RD.LDA` is linked from those 15 modules in that exact order**, and
+   `A2SHIP.LDA` is a separate single-module link. That settles the Phase 1 target
+   without having to infer it.
+
+   `SDGEN2.COM` holds no commands: 980 bytes of leftover *assembly source
+   fragments* in blocks a previous file once occupied — an RT-11 artefact, not a
+   second recipe.
+
+   **The `.LDA` oracles**, by record walk (`01 00 <count:16le> <addr:16le> …`):
+
+   | File | Records | Covers |
+   |---|---|---|
+   | `AST2RD.LDA` | 1002 | `0000-8FFF` |
+   | `ASTRD2.LDA` | 1002 | `0000-8FFF` |
+   | `SDUEL0.LDA` | 970 | `0000-8FFF` |
+   | `A2SHIP.LDA` | 55 | `2800-2FFF` |
+
+   All three full-size images differ from one another. `revision/` duplicates are
+   byte-identical to their top-level twins (`AST2RD.LDA`, `A2SHIP.LDA`,
+   `AST2RD.MAC` all `cmp`-clean), so that subtree adds nothing.
+
+   `ASTRD2.MAC` is a later patch release of `AST2RD.MAC` — 9 changed hunks,
+   including the `CKUM2` checksum going `.BYTE 055` to `042` and a region fenced
+   with "LEFT IN IN ORDER NOT TO HAVE TO RE-RELEASE ALL OF THE SPACE DUEL EROMS.
+   THERE ARE NO PATHS TO THIS CODE" — and it pairs with `ASTRD2.LDA`. It and
+   `SDUEL0.LDA` are out of scope; **the Phase 1 target is `AST2RD.LDA`**, with
+   `A2SHIP.LDA` as a standalone stepping stone that needs no linker at all.
+
+3c. **Section survey: 14 named CSECTs, not the handful expected.** Per module, in
+   link order:
+
+   | Module | Sections |
+   |---|---|
+   | `AS2ROM` | `.ASECT` |
+   | `AST2RD` | `.ASECT`, **`MULTB`, `EXPIC`, `ROCKDAT`** |
+   | `AST2RT` | `AST2RT` |
+   | `AS2SAC` | `AS2SAC` |
+   | `AS2POK` | `AS2POK` |
+   | `AS2COI` | none at top level |
+   | `A2NAME` | `A2NAME` |
+   | `AS2MSG` | `AS2MSG` |
+   | `AS2FIL` | `A2FILL` |
+   | `AS2TST` | `.ASECT`, unnamed `.CSECT`, `AS2TST` |
+   | `A2IRQ` | `AS2IRQ` |
+   | `A2EARO` | `A2EARO` |
+   | `XYSIG` | `.ASECT`, `XYSIG` |
+   | `VGUTR2` | `VGUTR2` |
+   | `A2GOOF` | none at top level |
+   | `A2SHIP` | `.ASECT` only |
+
+   Distinct named sections: `A2EARO A2FILL A2NAME AS2IRQ AS2MSG AS2POK AS2SAC
+   AS2TST AST2RT EXPIC MULTB ROCKDAT VGUTR2 XYSIG`, plus one unnamed `.CSECT` in
+   `AS2TST`.
+
+   Two things here contradict a first reading and matter for the section model:
+   **`AST2RD.MAC` is not `.ASECT`-only** — it carries three named sections of its
+   own — and `AS2TST` uses a bare unnamed `.CSECT` distinct from its named one,
+   so the model cannot treat "no operand" as "absolute". `AS2COI` and `A2GOOF`
+   declare nothing at top level; what their includes establish is unchecked.
+
+   Crystal Castles contains **no `.CSECT` at all**, verified by grep. That is the
+   control fact that makes this safe to build: its output must be unchanged by
+   any of it.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
