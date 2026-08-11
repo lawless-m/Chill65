@@ -370,50 +370,73 @@ structured-control-flow route at all.
    should resolve across units; that they do not is the question §7 item 3a's
    linking work has to answer, and it is no longer masked by a macro.
 
-3f. **AST2RD.MAC is damaged, ASTRD2.MAC is not, and the Phase 1 target should
-   change.** This corrects item 3b above, which named `AST2RD.LDA` as the
-   target and put `ASTRD2` out of scope, and it qualifies item 3a's
-   "no corruption found" — that check verified block structure, padding,
-   include resolution and macro expansion. It did not verify that the source
-   was *complete*, and a file listing cannot show that either.
+3f. **ASTRD2.MAC is the better Phase 1 root — but not for the reasons first
+   given here, which were wrong and are retracted.**
 
-   Same toolchain, the two roots assembled alone:
+   An earlier version of this item claimed AST2RD.MAC was *damaged*: that a
+   region of ~1,000 lines was absent from ASTRD2.MAC, that `CNTSCL`, `VGADD2`,
+   `LALJSR` and `LXHJSR` appeared 175-351 times in one file and **zero** times
+   in the other. **Those zeroes were an artefact of the measurement.**
+   ASTRD2.MAC contains NUL bytes mid-file, so `grep` classifies it as binary and
+   `grep -c` prints nothing and exits 1. The blanks were read as zeroes. Counted
+   properly, on raw bytes:
 
-   | Root | Errors |
+   | | AST2RD.MAC | ASTRD2.MAC |
+   |---|---|---|
+   | `TEMP2` | 41 | **114** |
+   | `CNTSCL` | 351 | **4** |
+   | `LALJSR` | 175 | **18** |
+
+   So the content is not absent from ASTRD2.MAC; it is *reduced*. The damage
+   claim does not follow and is withdrawn. Two greps in this effort have now
+   silently misled — this one, and reading a `grep -l` hit as a definition when
+   it was a `.GLOBL` declaration. **Prefer reading these files through Python
+   with explicit `latin-1` decoding; `grep` is not reliable on them.**
+
+   What survives, each measured by the assembler or by exact byte counting
+   rather than by grep:
+
+   - Assembled alone, **AST2RD.MAC reports 3,401 errors and ASTRD2.MAC 413**.
+   - **ASTRD2.MAC defines every label AST2RD.MAC defines, and 160 more** — 458
+     against 298, with 298 shared and *nothing* unique to AST2RD.MAC. It is a
+     strict superset.
+   - **ASTRD2.MAC has an `.END`; AST2RD.MAC has none**, alone among the root
+     modules (the seven other files lacking one are include files, which
+     legitimately have none).
+   - Both carry identical headers — `.TITLE AST2RD-ASTERIODS 2 (28503)`, same
+     date, same project number — so they are two revisions of one module, and
+     item 3b's finding that ASTRD2 is the later release stands.
+
+   **Recommendation unchanged: root the build at `ASTRD2.MAC`, oracle
+   `ASTRD2.LDA`.** The conclusion was right; the argument was not.
+
+3g. **Re-triage against the intact root, and sections are still not shown to be
+   the blocker.** Fifteen modules in SDGEN1.COM order with ASTRD2 substituted:
+
+   | Baseline | Errors |
    |---|---|
-   | `AST2RD.MAC` | **3,401** |
-   | `ASTRD2.MAC` | **413** |
+   | Original, AST2RD root | 7,805 |
+   | After `.IRP`/`.IRPC`/`.NCHR`/char-value | 4,925 |
+   | **ASTRD2 root** | **1,895** |
 
-   Five independent signs point the same way:
+   1,038 undefined symbols across 271 distinct names, 846 cascade, and — new —
+   "branch out of range" has disappeared entirely, which is what one expects
+   when operands start resolving. Five genuine parse anomalies remain, at
+   ASTRD2.MAC:3685 (`expected an operand, found Prefix(X)`, twice at two
+   columns) and :5012 (`expected an operand, found Punct(':')`).
 
-   - **A region of ~1,000 lines in AST2RD.MAC is absent from ASTRD2.MAC
-     entirely.** `CNTSCL`, `VGADD2`, `VGSTAT`, `SCRCLR` and `VGRTSL` occur
-     175-351 times each in AST2RD.MAC and **zero** times in ASTRD2.MAC.
-   - **It uses macros defined nowhere in the archive.** `LALJSR` and `LXHJSR`
-     appear 175 times each, only in AST2RD.MAC, and no `.MACRO` defines either.
-   - **Those symbols are defined nowhere either** — not in any of the fifteen
-     link modules, nor the macro packages. The original LINKM run could not
-     have resolved them, so this text cannot be what was built.
-   - **AST2RD.MAC has no `.END`.** It is the only *root* module lacking one;
-     the other seven files without it are include files, which legitimately
-     have none.
-   - **`SDGEN2.COM` contains a verbatim fragment of exactly that region** —
-     lines 3094-3099. Item 3b noted SDGEN2.COM holds leftover source in blocks
-     a previous file once occupied. Blocks moved between these two files, which
-     is what a damaged or partially recovered RT-11 volume looks like.
+   **A concrete new gap: `.GLOBB` is not implemented.** Nine uses in Space Duel,
+   none in Crystal Castles; the assembler emits `unknown mnemonic .GLOBB` and
+   counts it unhandled. It appears to declare byte-sized globals —
+   `AST2RD.MAC:140` reads `.GLOBB TEMP3,UPDFLG,FRAME,TEMP2,TEMP4,...` next to
+   `TEMP2: .BLKB 2`. Since the remaining undefined symbols are dominated by
+   exactly those `TEMP*` names, this is the first thing to try, and it is a
+   directive gap rather than a linking one.
 
-   ASTRD2.MAC by contrast has its `.END`, lacks the anomalous region, is the
-   later release (item 3b), and pairs with `ASTRD2.LDA` — which is the same
-   1,002 records over `0000-8FFF` as `AST2RD.LDA`.
-
-   **Recommendation: target `ASTRD2.MAC` → `ASTRD2.LDA`.** The build recipe in
-   `SDGEN1.COM` still stands for the other fourteen modules; only the root
-   changes. Residual uncertainty worth stating: an alternative reading is that
-   AST2RD.MAC is simply an older revision against a vector library that was
-   later renamed. That would not explain macros used 175 times and defined
-   nowhere, nor the missing `.END`, nor the block leakage into SDGEN2.COM — but
-   it has not been positively excluded, and the 413 errors ASTRD2.MAC still
-   reports have not yet been diagnosed.
+   **Answer to whether the section model is needed: still not established.** No
+   evidence yet attributes any remaining error to sections. `.GLOBB` should be
+   cleared first, and the taxonomy re-measured, before any section work is
+   contemplated.
 
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
