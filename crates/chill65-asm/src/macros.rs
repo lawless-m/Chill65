@@ -199,33 +199,67 @@ fn substitute(line: &[Token], bind: &[(String, Vec<Token>)]) -> Vec<Token> {
     while i < line.len() {
         let t = &line[i];
 
-        // Concatenation: TEXT'PARAM or PARAM'TEXT, possibly chained. Gather the
-        // whole run of tokens joined by quotes and fuse it into one symbol.
-        let joined = i + 1 < line.len() && matches!(line[i + 1].tok, Tok::Quote);
-        let follows_quote = i > 0 && matches!(line[i - 1].tok, Tok::Quote);
-        if joined || follows_quote {
-            if follows_quote {
-                // Already consumed as part of the previous run.
-                i += 1;
+        // Concatenation marks, and how they are told apart from the
+        // character-value operator.
+        //
+        // MACRO-11 spells both with `'`, and the lexer deliberately leaves it
+        // uninterpreted (see the module comment above) because only this layer
+        // knows the macro context. The distinction is **adjacency**: a quote
+        // that touches the token before it is a concatenation mark, and one
+        // with a space in front of it is the operator.
+        //
+        // Three forms appear, two of them in Space Duel alone:
+        //
+        // ```text
+        // B'COND          mark — Crystal Castles, HLL65F
+        // LABEL''X''Y     marks — fuse LABEL, X and Y into one symbol
+        // ...4=''...5     operator then mark — the code of ...5's character
+        // ```
+        //
+        // A quote is a **mark** when it either touches fusable text on its left
+        // or introduces a bound parameter on its right; anything else is the
+        // operator. Space alone will not do as the test: `.BYTE ''C` separates
+        // the operator with one, and `...4=''...5` does not.
+        //
+        // Getting this wrong fused `.BYTE` with its quote and produced a
+        // mnemonic named `.BYTE'`.
+        let fusable = |k: usize| {
+            matches!(line[k].tok, Tok::Symbol(_) | Tok::Number { .. })
+        };
+        let is_mark = |k: usize| {
+            if !matches!(line[k].tok, Tok::Quote) {
+                return false;
+            }
+            let left = k > 0 && !line[k].space_before && fusable(k - 1);
+            let right = line.get(k + 1).is_some_and(|n| {
+                !n.space_before && matches!(&n.tok, Tok::Symbol(s) if lookup(bind, s).is_some())
+            });
+            left || right
+        };
+
+        if is_mark(i) {
+            // Doubled marks are one join, not two: `LABEL''X` closes LABEL and
+            // opens X. Skip the run of marks and take the token beyond it.
+            let mut k = i;
+            while k < line.len() && is_mark(k) {
+                k += 1;
+            }
+            if let Some(next) = line.get(k) {
+                let text = render(next, bind);
+                match out.last_mut() {
+                    // Fuse with what is already there, unless that is the
+                    // character-value operator waiting for its character.
+                    Some(last) if !matches!(last.tok, Tok::Quote) => {
+                        let fused = format!("{}{}", tok_text(last), text);
+                        let (span, sp) = (last.span.clone(), last.space_before);
+                        *last = synthetic(Tok::Symbol(fused), &span, sp);
+                    }
+                    _ => out.push(synthetic(Tok::Symbol(text), &next.span, false)),
+                }
+                i = k + 1;
                 continue;
             }
-            let mut text = String::new();
-            let mut j = i;
-            loop {
-                text.push_str(&render(&line[j], bind));
-                if j + 1 < line.len() && matches!(line[j + 1].tok, Tok::Quote) {
-                    j += 2;
-                    if j >= line.len() {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            if !text.is_empty() {
-                out.push(synthetic(Tok::Symbol(text), &t.span, t.space_before));
-            }
-            i = j + 1;
+            i = k;
             continue;
         }
 

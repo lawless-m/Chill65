@@ -297,6 +297,30 @@ fn atom(toks: &[Token], i: usize, ctx: &Context) -> Result<(Eval, usize), ExprEr
             None => Ok((Eval::Unresolved(name.clone()), 1)),
         },
 
+        // `'X` — MACRO-11's character-value operator: the ASCII code of the
+        // character that follows.
+        //
+        // The lexer leaves `'` as an uninterpreted `Tok::Quote` because it is
+        // also the macro concatenation mark, and only the consumer knows which
+        // is meant (see the module comment in `macros.rs`). Here we are in an
+        // expression, so it is the operator.
+        //
+        // Space Duel's `ASCIN` macro walks a string with `.IRPC` and takes each
+        // character's code with `...4=''...5` — the first quote is this
+        // operator, the second is the concatenation mark introducing the
+        // parameter, which macro expansion has already consumed by the time the
+        // expression is evaluated. Crystal Castles never uses either form.
+        Tok::Quote => {
+            let Some(next) = toks.get(i + 1) else {
+                return Err(err("'\'' with no character after it", Some(t)));
+            };
+            let text = crate::macros::token_text(next);
+            match text.chars().next() {
+                Some(c) => Ok((Eval::Value(c as u16), 2)),
+                None => Err(err("'\'' applied to an empty token", Some(next))),
+            }
+        }
+
         // <expr> — the only grouping construct, and the only way to defeat
         // left-to-right evaluation.
         Tok::Punct('<') => {

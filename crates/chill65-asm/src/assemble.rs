@@ -895,6 +895,8 @@ impl<'a> Assembler<'a> {
         match d {
             Dir::Asect | Dir::Nocross | Dir::Ignored => {}
 
+            Dir::Nchr => self.nchr(args),
+
             Dir::Radix => {
                 // The operand of .RADIX is always decimal, whatever the current
                 // radix — otherwise `.RADIX 10` under hex would mean sixteen.
@@ -1224,6 +1226,43 @@ impl<'a> Assembler<'a> {
 
     /// `.IRP NAME,<a,b,c>` … `.ENDR` — run the body once per item with NAME
     /// bound to it. Shares `.ENDR` with `.REPT`, so the scanner counts both.
+    /// `.NCHR SYM,<text>` — define SYM as the character count of the bracketed
+    /// argument.
+    ///
+    /// The count is over the argument's **raw text**, as `.IRPC`'s is: `<0123>`
+    /// lexes as one number, so counting an evaluated value would give 1 where
+    /// the answer is 4. `token_text` recovers each token's source spelling, and
+    /// `Tok::Number` keeps its digits verbatim.
+    ///
+    /// The name and the argument arrive the same way `.IRP`'s do, including the
+    /// case where the name is spelled like an addressing mode and the lexer has
+    /// already swallowed the separating comma — see `irp_block`.
+    fn nchr(&mut self, args: Line) {
+        if !self.active() {
+            return;
+        }
+        let fields = split_commas(args);
+        let (name, list): (Option<String>, Vec<Token>) =
+            match fields.first().and_then(|f| f.first()).map(|t| &t.tok) {
+                Some(Tok::Symbol(s)) => (
+                    Some(s.clone()),
+                    fields.get(1).map(|f| f.to_vec()).unwrap_or_default(),
+                ),
+                Some(Tok::Prefix(m)) => (Some(m.name().to_string()), fields[0][1..].to_vec()),
+                _ => (None, Vec::new()),
+            };
+        let Some(name) = name else {
+            self.errors.push(".NCHR needs a symbol to define".into());
+            return;
+        };
+        let text: String = list
+            .iter()
+            .filter(|t| !matches!(t.tok, Tok::Punct('<') | Tok::Punct('>')))
+            .map(crate::macros::token_text)
+            .collect();
+        self.define(&name, text.chars().count() as u16, false);
+    }
+
     /// `.IRP` and `.IRPC`. They differ only in how the item list is cut:
     /// `.IRP` takes comma-separated items, `.IRPC` one character each.
     fn irp_block(&mut self, args: Line, lines: &[Line], idx: usize, per_char: bool) -> usize {
@@ -1758,6 +1797,110 @@ mod tests {
             errs.iter().any(|e| e.contains(".IRPC without matching .ENDR")),
             "{errs:?}"
         );
+    }
+
+    #[test]
+    fn nchr_counts_the_characters_of_its_argument() {
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             	.NCHR CNT,<HELLO>\n\
+             	.BYTE CNT\n\
+             	.END\n",
+        )])
+        .expect("assembly failed");
+        assert_eq!(img.get(&0xA000), Some(&5));
+    }
+
+    /// The count is over raw characters, not an evaluated value: `<0123>` lexes
+    /// as one number, and counting what it evaluates to would give 1.
+    #[test]
+    fn nchr_counts_raw_characters_not_an_evaluated_value() {
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             	.NCHR CNT,<0123>\n\
+             	.BYTE CNT\n\
+             	.END\n",
+        )])
+        .expect("assembly failed");
+        assert_eq!(img.get(&0xA000), Some(&4));
+    }
+
+    /// `'X` is MACRO-11's character-value operator.
+    #[test]
+    fn a_quote_yields_the_character_code() {
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             V='A\n\
+             	.BYTE V\n\
+             	.END\n",
+        )])
+        .expect("assembly failed");
+        assert_eq!(img.get(&0xA000), Some(&0x41));
+    }
+
+    /// The operator and the concatenation mark, spelled the same and adjacent.
+    ///
+    /// This is Space Duel's `ASCIN` shape: walk a string with `.IRPC` and take
+    /// each character's code with `''PARAM` — the first quote is the operator,
+    /// the second introduces the parameter.
+    #[test]
+    fn a_doubled_quote_is_the_operator_then_a_concatenation_mark() {
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.MACRO T STRING\n\
+             	.IRPC C,<STRING>\n\
+             	.BYTE ''C\n\
+             	.ENDR\n\
+             	.ENDM\n\
+             	.=0A000\n\
+             	T <AB>\n\
+             	.END\n",
+        )])
+        .expect("assembly failed");
+        let bytes: Vec<u8> = (0xA000u16..0xA002).filter_map(|a| img.get(&a).copied()).collect();
+        assert_eq!(bytes, vec![0x41, 0x42]);
+    }
+
+    /// And with no space either, which is how the game actually writes it:
+    /// `...4=''...5`. Space alone cannot distinguish operator from mark.
+    #[test]
+    fn the_operator_is_recognised_without_a_preceding_space() {
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.MACRO T STRING\n\
+             	.IRPC C,<STRING>\n\
+             V=''C\n\
+             	.BYTE V\n\
+             	.ENDR\n\
+             	.ENDM\n\
+             	.=0A000\n\
+             	T <AB>\n\
+             	.END\n",
+        )])
+        .expect("assembly failed");
+        let bytes: Vec<u8> = (0xA000u16..0xA002).filter_map(|a| img.get(&a).copied()).collect();
+        assert_eq!(bytes, vec![0x41, 0x42]);
+    }
+
+    /// Concatenation must still fuse. This is HLL65F's `B'COND` shape, which
+    /// Crystal Castles depends on for its counted-shift macros.
+    #[test]
+    fn a_quote_between_text_and_a_parameter_still_concatenates() {
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.MACRO T SUF\n\
+             	.BYTE VAL'SUF\n\
+             	.ENDM\n\
+             VALX=07\n\
+             	.=0A000\n\
+             	T X\n\
+             	.END\n",
+        )])
+        .expect("assembly failed");
+        assert_eq!(img.get(&0xA000), Some(&7), "VAL'SUF must fuse to VALX");
     }
 
     #[test]

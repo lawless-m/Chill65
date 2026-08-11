@@ -335,6 +335,41 @@ structured-control-flow route at all.
    magnitude and expose whatever is actually underneath, rather than building
    sections against a signal dominated by one macro.
 
+3e. **`.NCHR` and the character-value operator, cleared.** Both implemented;
+   the 15-module error count falls **7,805 → 4,925**, and undefined symbols
+   **5,426 → 2,546**. `...4` and `...C` are gone entirely — they were the two
+   largest entries and between them 2,880 errors.
+
+   Two things had to be right, and only the first was expected:
+
+   - `.NCHR SYM,<text>` counts the argument's **raw characters**, as `.IRPC`
+     does. `<0123>` is four, not the value those digits evaluate to.
+   - `'` is both MACRO-11's character-value operator and its concatenation
+     mark, and the corpus uses all three combinations — `B'COND` (mark, Crystal
+     Castles), `LABEL''X''Y` (two marks, AS2POK) and `...4=''...5` (operator
+     then mark, AST2RD). **Whitespace does not distinguish them**: `.BYTE ''C`
+     separates the operator with a space and `...4=''...5` does not. What works
+     is that a quote is a mark when it either touches fusable text on its left
+     or introduces a bound parameter on its right. An earlier rule based on
+     spacing fused `.BYTE` with its quote and produced a mnemonic named
+     `.BYTE'`.
+
+   **What is left, and it is now the real subject of the section work:**
+
+   | Count | Kind |
+   |---|---|
+   | 2,546 | undefined symbol (283 distinct) |
+   | 2,026 | cascade — "requires an operand" |
+   | 347 | cascade — "branch out of range" |
+   | 6 | expression ended unexpectedly |
+
+   The undefined symbols are now led by `CNTSCL` (350), `VGADD2` (195),
+   `VGSTAT` (181), `SCRCLR` and `VGRTSL` (175 each) — the vector-generator
+   entry points, plus the `~L311$*` HLL65F labels and the `TEMP*` scratch
+   symbols. All are defined and `.GLOBL`-exported by `AST2RD.MAC`, so they
+   should resolve across units; that they do not is the question §7 item 3a's
+   linking work has to answer, and it is no longer masked by a macro.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 

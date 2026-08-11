@@ -40,6 +40,10 @@ pub enum Dir {
     /// Castles; Space Duel uses it fourteen times, building parallel symbol
     /// families such as `ROCK'X'1` over `<0123>`.
     Irpc,
+    /// `.NCHR SYM,<text>` — define SYM as the number of characters in the
+    /// bracketed argument. Absent from Crystal Castles; Space Duel uses it five
+    /// times, all inside string-to-character-code macros.
+    Nchr,
     Endr,
     Error,
     Globl,
@@ -86,6 +90,7 @@ pub fn classify(name: &str) -> Option<Dir> {
         ".REPT" => Dir::Rept,
         ".IRP" => Dir::Irp,
         ".IRPC" => Dir::Irpc,
+        ".NCHR" => Dir::Nchr,
         ".ENDR" => Dir::Endr,
         ".ERROR" => Dir::Error,
         ".GLOBL" => Dir::Globl,
