@@ -397,18 +397,18 @@ frame rather than accumulated per line, so the overshoot does not compound
 across the 256 lines; each IRQ still lands within one instruction of its true
 cycle. Tested over 20 consecutive frames.
 
-## 8. POKEY ×2 (**corroborated**) — and why there is no audio
+## 8. POKEY ×2 (**verified against the core**)
 
 Implemented in `crates/chill65-runtime/src/pokey.rs`.
 
-### 8.1 Audio is deliberately absent
+Audio *was* deliberately absent: plan §5 calls POKEY "not the interesting part"
+and the Phase 2 gate is headless, so there was no output device to feed. That is
+no longer true — §8.7 onward describe the synthesis and how it was checked. The
+register-level facts in §8.2–8.6 are unchanged and still hold.
 
-**Audio synthesis is not implemented, by decision rather than oversight.** Plan
-§5 calls POKEY "not the interesting part", and the Phase 2 gate is headless, so
-there is no output device to feed. The audio registers are stored and never
-acted on. Recording it here so its absence is a documented choice.
+### 8.1 `RANDOM` is gameplay, not noise
 
-`RANDOM` is a different matter and *is* implemented properly, because the game
+`RANDOM` was implemented properly even while audio was not, because the game
 reads it to make **gameplay** decisions rather than merely noise:
 
 - `CATOUT.MAC:22` — `LDA RANDOM / AND #0E0 / ADC #010 / STA XB` chooses the
@@ -444,6 +444,15 @@ Transcribed literally from `Pokey/pokey_poly_17_9.v:47-70` rather than from
 prose, since the published descriptions of POKEY's poly17 disagree with one
 another. Points worth stating:
 
+> **A sourcing exception.** That file is one of Mark Watson's, which §8.7 says
+> cannot be a source here. This transcription predates that rule and is left in
+> place rather than quietly rewritten, because it is a decision to take rather
+> than a bug to fix. It can be settled without changing a line of it: distortion
+> `AUDC = 0x8` puts poly17 on the output the same way `0xC` puts poly4 there, so
+> the sequence can be measured off the core and this implementation either
+> confirmed or replaced. Noted here so the inconsistency is visible rather than
+> buried.
+
 - Reset word is `17'b01010101010101010` = `0xAAAA` (`:39`).
 - Feedback is `shift_reg[13] ~^ shift_reg[8]` — **XNOR, not XOR** (`:47`). From
   the reset word bit 13 is set and bit 8 clear, so the two differ immediately;
@@ -474,6 +483,197 @@ zero from ALLPOT means "no pot still counting", so anything polling it for
 completion proceeds rather than hangs. IRQST reads `0xFF` (active-low: nothing
 pending); POKEY's IRQ is not wired to this CPU in any case, since interrupts
 come from the video counters (§7.3). SKSTAT reads `0xFF`.
+
+
+### 8.7 Audio: measured, not transcribed
+
+Everything from here down was recovered by **running original fixtures on the
+verilated core and reading its `SOUT` output back**, not by reading its POKEY
+sources. That is a licence constraint with teeth: `rtl/Pokey/` is © 2013 Mark
+Watson, licensed for non-commercial use only with the notice extending to
+derived works, and this repository is MIT. Observing what hardware does is a
+different act from copying how someone expressed it, and only the first is
+available here.
+
+The practical consequence is that every claim below is backed by a measurement
+that can be repeated, and the ones that could **not** be measured say so rather
+than being filled in from a datasheet. Where measurement and the published
+descriptions of the chip agree, that agreement is itself evidence and is noted.
+
+### 8.8 The free-running parts
+
+**Two clock divisors**, both measured. A pure tone with `AUDF = 0` toggles once
+per divider tick, so its period is two ticks:
+
+| `AUDCTL` bit 0 | measured period | divisor |
+|---|---|---|
+| clear | 56 cycles | **28** |
+| set | 228 cycles | **114** |
+
+Their ratio, 4.07, is the documented 63.9 kHz : 15.7 kHz relationship — the
+cross-check that these are POKEY's two audio clocks and not some other pair.
+Note that this board clocks POKEY at the 1.25 MHz CPU rate rather than 1.79 MHz
+(§8.3), so the *divisors* are the chip's and the resulting frequencies are not:
+44.6 kHz and 11.0 kHz.
+
+**Two polynomial counters**, `x⁴+x³+1` (taps 0,1, XOR) and `x⁵+x³+1` (taps 0,2,
+XNOR) — the standard maximal polynomials, which is independent agreement between
+measurement and the published descriptions.
+
+Recovering them took three steps, because neither can be read off directly:
+
+1. **They free-run.** The channel samples the polynomial when its divider
+   underflows, so what reaches the output is a *decimation*. Changing `AUDF`
+   changes the sequence, which is what a free-running register does and a
+   divider-stepped one does not.
+2. **They run at the CPU clock, not the base clock.** With a channel on the main
+   clock (`AUDCTL` bit 6) the output period is 60 cycles at `AUDF = 0` and 120
+   at `AUDF = 4` — fifteen underflows either way. Fifteen distinct values inside
+   60 cycles is impossible for a register stepping once per 28-cycle base tick.
+3. **Two decimations solve them.** The slow path samples every 28 cycles and the
+   fast path every 4; both are invertible modulo 15 and 31, so each reading
+   un-decimates into a candidate register. They agree up to rotation — two
+   unrelated sampling rates cannot produce consistent nonsense.
+
+poly5 needed one extra step, because it never reaches the output at all: it
+*gates* the stage behind it, so its bits are in the output's **transitions**.
+Its polarity has a second, independent witness — XNOR excludes the all-ones
+state where XOR excludes all-zeros, giving 15 ones per 31 terms rather than 16,
+and an odd count per period is exactly what makes the gated output's period 62
+ticks instead of 31.
+
+**No delayed taps are modelled.** Plain undelayed registers reproduce both
+captured sequences term for term. A delay in the real part would appear as a
+constant phase offset, which is what §8.12's alignment measures — so if one
+exists it shows up in a place built to measure it rather than being guessed at.
+
+### 8.9 The per-channel pipeline
+
+Per chip: four channels, each an 8-bit divider feeding an output flip-flop
+feeding a volume gate, summed to the chip's six-bit `snd`.
+
+**Dividers**, measured: a channel underflows every `AUDF + 1` base-clock ticks,
+or every `AUDF + 4` CPU cycles on the main clock.
+
+**Distortion**, from `AUDC` bits 7:5 — the whole table measured, by sweeping all
+eight settings and recording each period in divider ticks:
+
+| `AUDC` | period | source |
+|---|---|---|
+| `0x0` | none | poly5 + poly17 |
+| `0x2` | 62 | poly5 + pure tone |
+| `0x4` | 465 = 15×31 | poly5 + poly4 |
+| `0x6` | 62 | *identical to* `0x2` |
+| `0x8` | none | poly17 |
+| `0xA` | 2 | pure tone |
+| `0xC` | 15 | poly4 |
+| `0xE` | 2 | *identical to* `0xA` |
+
+The two collapsed pairs are the finding: **bit 7 selects whether poly5 is in the
+chain**, and bits 6:5 pick poly17, poly4 or a pure tone after it. With poly5 in
+circuit the flip-flop holds rather than updates when its bit is clear, which is
+why those settings measure twice the period. The pure-tone case toggles; the
+polynomial cases take the polynomial's bit, which is why poly4 alone measures 15
+rather than 30.
+
+**High-pass**: `AUDCTL` bit 2 filters channel 1 against channel 3 and bit 1
+channel 2 against channel 4 — a flip-flop samples the filtered channel at each
+of the clocking channel's underflows, and the two are XORed. **Not measured**;
+the game is not known to use it.
+
+**16-bit joins**: `AUDCTL` bit 4 joins channels 1+2 and bit 3 joins 3+4 into one
+divider clocked by the low channel. **Not measured** for the same reason.
+
+**Volume**: `AUDC` bits 3:0 are the level and bit 4 is volume-only, emitting the
+level continuously and ignoring the flip-flop — which is how software plays
+sampled sound.
+
+**Summation**: four channels of 0–15 make the chip's six-bit `snd`, 0–60, and
+the board sums both chips as `SOUT = {2'b00,snd1}+{2'b00,snd2}`
+(`AudioOutput.v:51`), 0–120 in eight bits. That last is a wiring fact about this
+board, readable from a file that is not one of the restricted ones.
+
+### 8.10 `STIMER` does two things, and both were found the hard way
+
+Writing `STIMER` (register `09`, write-only, sharing an address with `KBCODE`'s
+read) restarts the channels so software can stop them beating against each
+other. Two details were wrong until the whole path was compared at once, and
+neither could have been caught by measuring one signal in isolation:
+
+- **It restarts the base-clock prescaler**, not only the channel counters. The
+  fixture strobes one chip and then the other, four cycles apart — one `STA` —
+  and the core puts the two chips' first edges exactly those four cycles apart.
+  A free-running prescaler would have both chips share the 28-cycle grid and
+  fire together however they were strobed.
+- **It sets the output flip-flops rather than clearing them.** With them
+  cleared, every tone came out inverted against the core: identical periods,
+  identical run lengths, opposite phase by exactly half a period each. It cannot
+  instead be a global output inversion, because poly4's sequence was identified
+  from the core's own output and inverting would break it.
+
+### 8.11 What is not modelled, and why it cannot matter
+
+The serial port, two-tone mode, the keyboard scan and the pot counters are
+absent. This board's driver writes `SKCTL = 7` (`CST.MAC:18-19`) and never
+enables any of them — bits 6:4 and 3 stay zero for the life of the program — and
+nothing reads back a serial or two-tone result, so there is no path by which
+their absence produces a silently wrong answer. POKEY's IRQ is not wired to this
+CPU at all; interrupts come from the video counters (§7.3).
+
+Three things *within* the audio path are honestly unestablished, and each says
+so where it is implemented rather than only here:
+
+- **poly17's audio tap** — which bit of that register the audio path uses. §8.4
+  models poly17 for `RANDOM`, which reads a different field entirely. This is
+  the one input to the pipeline that is a guess.
+- **The joined 16-bit modes** and **the high-pass filters**, neither exercised
+  by any fixture.
+
+### 8.12 How it was verified
+
+`crates/chill65-diff/fixture/audio.MAC` is an original program of ours — no game
+bytes, no corpus needed. It programs both chips (two pure tones at different
+frequencies so they beat, plus a volume-only DC level), strobes `STIMER` and
+idles. Both implementations run it and their per-cycle `SOUT` streams are
+compared byte for byte:
+
+```
+audio fixture: aligned at lag 665, 40000 consecutive samples identical
+control (AUDF0 5 -> 6): aligned at None
+```
+
+The two sides cannot share a cycle origin — ours starts at the CPU's first cycle
+after reset, the core's recording at the tick after `reset_n` is released — so
+the test searches for the constant lag that aligns them, asserts it is small and
+bounded, prints it, and then requires **exact** equality across the window. A
+tolerance nobody derived would be a weakened gate; there is none.
+
+The control detunes one `AUDF` byte in our own program and requires the
+comparison to stop aligning at any lag. It does. A gate that cannot fail is not
+a gate.
+
+The fixture deliberately selects **no polynomial distortion**. The polynomials
+are measured and tested, but their *phase at reset* is not established — the
+fixtures that identified them idled for tens of thousands of cycles first, so
+they read the sequence and not its origin. Including one would compare our
+arbitrary starting phase against the core's real one and fail for a reason
+outside the audio path.
+
+### 8.13 Where the sound comes out
+
+The runtime **produces samples and plays nothing**, the same seam the EAROM and
+the clock sit on: it must build for `wasm32-unknown-unknown`, so it has no audio
+device, no filesystem and no clock. `run_frame` leaves one `u8` per CPU cycle in
+a buffer the embedder reads — 20,480 per frame plus the overshoot §7.5
+documents, since interrupts are checked at instruction boundaries.
+
+It is **off by default** and observationally free when off. With it on, frame
+hashes and cycle counts are bit-identical to a run with it off, and there is a
+test asserting exactly that: audio changes no picture.
+
+The browser page resamples the 1.25 MHz stream to the audio device's rate and
+schedules it against the `AudioContext` clock, which is not the clock game
+frames are driven from. `wasm.md` has that end of it.
 
 ## 9. Inputs — switches and trackball (**corroborated**)
 

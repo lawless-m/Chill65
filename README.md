@@ -158,8 +158,38 @@ hash, and so unnoticed since Phase 3. `hardware.md` §12.2 has the measured
 table.
 
 **Playable.** The milestone Phase 2 left open is closed: the game has been
-played to a high score in a browser, on a trackball. Windowing and audio remain
-out of scope; the core stays headless and dependency-free.
+played to a high score in a browser, on a trackball. Windowing stays out of
+scope; the core remains headless and dependency-free.
+
+**Sound — POKEY, measured rather than read.** The audio path is synthesised and
+**verified against the core to 40,000 consecutive identical samples**, on an
+original fixture with a control that must fail.
+
+```
+cargo test -p chill65-diff --test audio_fixture -- --ignored --nocapture
+```
+
+It could not be transcribed: the MiSTer core's `rtl/Pokey/` is licensed for
+non-commercial use only (see below). So every part of it was recovered by
+running fixtures on the core and reading its output back — the two clock
+divisors, the eight-entry distortion table, and both polynomials, which come out
+as `x⁴+x³+1` and `x⁵+x³+1`, the standard maximal ones. Measurement and the
+published descriptions agree, which is worth more than either alone.
+
+Neither polynomial can be read off directly. They free-run at the CPU clock
+while each channel samples them only when its divider underflows, so the output
+is a *decimation* of the register; and poly5 never reaches the output at all,
+only gating the stage behind it, so its bits are in the transitions. Two
+different sampling rates, un-decimated and cross-checked against each other,
+recover them. `hardware.md` §8.7–8.12 has the full method.
+
+Building it a piece at a time still left two things wrong, and only running the
+whole path at once found them — both in `STIMER`, which turns out to restart the
+base-clock prescaler and to *set* the output flip-flops rather than clear them.
+
+The runtime produces samples and plays nothing, the same seam the EAROM sits on;
+the browser page resamples and schedules them. Audio is off by default and
+changes no frame hash.
 
 See `atari-recompiler-plan.md` for the full plan, and:
 
@@ -207,10 +237,12 @@ and where.
 
 **`rtl/Pokey/` in that repository is *not* under the same terms.** Those files
 are © 2013 Mark Watson, licensed for non-commercial use only, and the notice
-extends to derived works. The POKEY audio path here is therefore written from
-published documentation of the chip and **not** transcribed from those files.
-The verilated core is still used as an *oracle* — the model's output is compared
-against the core's, which observes behaviour rather than copying expression.
+extends to derived works. The POKEY audio path here is therefore **measured, not
+transcribed**: original fixtures run on the verilated core and its output is read
+back, so what is recorded is the hardware's behaviour rather than anyone's
+expression of it. Published descriptions of the chip were used to know what to
+look for, and they agree with what was measured. One older exception is flagged
+in place — `hardware.md` §8.4 — rather than quietly rewritten.
 
 The core is used unmodified in every case, and nothing from it is redistributed
 here.
