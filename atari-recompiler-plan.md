@@ -145,7 +145,35 @@ Cheap, and may reshape everything downstream.
 **Deliverable:** browser build; `wasm.md` on constraints hit and how they were resolved.
 
 ### Phase 6 — Second game
-Recommended: a vector title (Asteroids Deluxe, Black Widow, Space Duel — subject to Phase 0.3 integrity findings).
+**Decided: Space Duel.** This section originally recommended "a vector title
+(Asteroids Deluxe, Black Widow, Space Duel — subject to Phase 0.3 integrity
+findings)" and deferred the choice until after Phase 4, when the cost of a
+per-game hardware model would be known from experience rather than estimated.
+Phases 4 and 5 are done, along with motion objects and POKEY audio, so that
+experience exists and the choice is made.
+
+Space Duel on the evidence in `inventory.md` §7, which reached the same
+conclusion independently:
+
+- It has **HLL65F**, so the structured-control-flow path applies. Asteroids
+  Deluxe does not, which makes it the weakest of the three despite being listed
+  first here.
+- It has the **shared vector macros** on the `VGMC`/`VGUT` branch used by four
+  other titles. Black Widow's `VGMC16`/`VGUT16` differ, so Space Duel sits on
+  the more reusable side.
+- It ships **`.LDA` files**, which are oracles — the Phase 1 gate for Crystal
+  Castles was byte-identical output against exactly this kind of artefact.
+- 184 KB, 26 `.MAC`, 24 `.DAT`, plus a `revision/` subtree.
+
+Two things to settle before relying on it, neither blocking the decision:
+
+1. **The corruption caution is unresolved.** This plan warned the tree might be
+   corrupt; `inventory.md` found that "not corroborated by the file listing" but
+   was explicit that file listings cannot detect corruption. It needs a content
+   check, which is the natural first task.
+2. **It was built on Asteroids Deluxe** (`AST2RD.MAC`, `ASTRD2.MAC`, `A2*.MAC`),
+   so expect inherited 1981-era dialect alongside the 1983 HLL65F — the archive
+   is two dialects and this title may straddle them.
 
 Rationale: same 6502 and POKEY, but rendering goes through a vector generator — a small, well-documented display-list processor with no custom pixel hardware to model. In a browser that is line segments on a canvas. This proves engine generality for a fraction of the hardware work, and vector games look genuinely good with modern line rendering. Centipede would exercise the raster path harder, and is the natural third.
 
