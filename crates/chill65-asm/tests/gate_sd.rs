@@ -78,17 +78,27 @@ fn load_lda(path: &PathBuf) -> BTreeMap<u16, u8> {
 struct Built {
     image: BTreeMap<u16, u8>,
     symbols: Vec<(u16, String, String)>,
+    errors: Vec<String>,
 }
 
+/// Assemble, and hand back the image **whether or not the assembly was clean**.
+///
+/// The fifteen-module program does not yet assemble without errors, and a
+/// panic there would say only that. What the image contains at that point is
+/// evidence: which modules landed, where, and against what. `Assembler` keeps
+/// `image` populated on the error path, so the comparison can still run and
+/// still report. Callers that require a clean assembly assert on `errors`
+/// themselves — the ship gate does.
 fn build(corpus: &str, roots: &[&str], dirs: &[&str]) -> Built {
     let root = PathBuf::from(corpus);
     let p = Search {
         dirs: dirs.iter().map(|d| root.join(d)).collect(),
     };
     let mut a = Assembler::new(&p);
-    let image = a
-        .assemble_units(roots)
-        .unwrap_or_else(|e| panic!("assembly failed:\n{e:#?}"));
+    let (image, errors) = match a.assemble_units(roots) {
+        Ok(img) => (img, Vec::new()),
+        Err(errs) => (std::mem::take(&mut a.image), errs),
+    };
     let mut symbols: Vec<(u16, String, String)> = a
         .globals
         .iter()
@@ -102,7 +112,57 @@ fn build(corpus: &str, roots: &[&str], dirs: &[&str]) -> Built {
         }
     }
     symbols.sort();
-    Built { image, symbols }
+    Built {
+        image,
+        symbols,
+        errors,
+    }
+}
+
+/// Group the assembly errors by kind, so a report shows the shape of what is
+/// left rather than seven hundred lines of it.
+fn report_errors(errors: &[String]) {
+    if errors.is_empty() {
+        return;
+    }
+    let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut undefined: BTreeMap<&str, usize> = BTreeMap::new();
+    for e in errors {
+        let kind = if let Some(at) = e.find("undefined symbol ") {
+            let name = e[at + "undefined symbol ".len()..]
+                .split_whitespace()
+                .next()
+                .unwrap_or("?");
+            *undefined.entry(name).or_default() += 1;
+            "undefined symbol"
+        } else if e.contains("requires an operand") {
+            "cascade: requires an operand"
+        } else if e.contains("branch out of range") {
+            "cascade: branch out of range"
+        } else {
+            "other"
+        };
+        *kinds.entry(kind).or_default() += 1;
+    }
+    eprintln!("  {} assembly errors:", errors.len());
+    let mut by_kind: Vec<_> = kinds.into_iter().collect();
+    by_kind.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (k, n) in by_kind {
+        eprintln!("    {n:6}  {k}");
+    }
+    let mut by_name: Vec<_> = undefined.into_iter().collect();
+    by_name.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    eprintln!("  {} distinct undefined symbols; first ten:", by_name.len());
+    for (k, n) in by_name.iter().take(10) {
+        eprintln!("    {n:6}  {k}");
+    }
+    for e in errors.iter().filter(|e| {
+        !e.contains("undefined symbol")
+            && !e.contains("requires an operand")
+            && !e.contains("branch out of range")
+    }) {
+        eprintln!("    other: {e}");
+    }
 }
 
 fn nearest_symbol(syms: &[(u16, String, String)], addr: u16) -> String {
@@ -189,7 +249,57 @@ fn ship_image_is_byte_identical() {
         return;
     };
     let built = build(&c, &["A2SHIP.MAC"], &["."]);
+    assert!(
+        built.errors.is_empty(),
+        "the single-module link must assemble cleanly:\n{:#?}",
+        built.errors
+    );
     let oracle = load_lda(&PathBuf::from(&c).join("A2SHIP.LDA"));
     let n = compare("SHIP", &built, &oracle, 0x2800, 0x2FFF);
     assert_eq!(n, 0, "ship image must match the oracle exactly");
+}
+
+/// The fifteen-module program, `0000-8FFF`, against `ASTRD2.LDA`.
+///
+/// `SDGEN1.COM`'s link order, with `ASTRD2` in place of `AST2RD`: the two are
+/// revisions of one module, `ASTRD2` is the later release and pairs with the
+/// `ASTRD2.LDA` oracle, and it assembles at 413 errors alone against
+/// `AST2RD.MAC`'s 3,401. `inventory.md` §7 items 3b and 3f record how that was
+/// established, including a retraction of the first reasoning for it.
+///
+/// **This does not pass yet, and it is committed failing on purpose.** The
+/// assembly still reports errors and no linker exists, so what this gate does
+/// today is measure: how much of the image is right, where the first
+/// difference is, what symbol it sits in, and how the differences are shaped.
+/// The assertion is the target and stays as written — weakening it to make the
+/// suite green would leave nothing that could tell us when the target is met.
+/// It is `#[ignore]`d, so a default `cargo test` is unaffected.
+#[test]
+#[ignore = "needs CHILL65_CORPUS pointing at a local source tree"]
+fn program_image_is_byte_identical() {
+    let Some(c) = corpus() else {
+        return;
+    };
+    const ROOTS: [&str; 15] = [
+        "AS2ROM.MAC",
+        "ASTRD2.MAC",
+        "AST2RT.MAC",
+        "AS2SAC.MAC",
+        "AS2POK.MAC",
+        "AS2COI.MAC",
+        "A2NAME.MAC",
+        "AS2MSG.MAC",
+        "AS2FIL.MAC",
+        "AS2TST.MAC",
+        "A2IRQ.MAC",
+        "A2EARO.MAC",
+        "XYSIG.MAC",
+        "VGUTR2.MAC",
+        "A2GOOF.MAC",
+    ];
+    let built = build(&c, &ROOTS, &["."]);
+    report_errors(&built.errors);
+    let oracle = load_lda(&PathBuf::from(&c).join("ASTRD2.LDA"));
+    let n = compare("PROGRAM", &built, &oracle, 0x0000, 0x8FFF);
+    assert_eq!(n, 0, "program image must match the oracle exactly");
 }

@@ -515,6 +515,45 @@ structured-control-flow route at all.
    **Sections are still not implicated.** Four rounds of triage and not one
    error yet attributes to them.
 
+3j. **The program gate exists, and it settles the section question: sections
+   *are* the blocker.** `gate_sd.rs` now carries
+   `program_image_is_byte_identical` — fifteen modules in SDGEN1.COM order with
+   ASTRD2 substituted, compared over `0000-8FFF` against `ASTRD2.LDA`. It is
+   committed **failing**, at 18,870 of 36,864 bytes (51.19%), because there is
+   nothing yet to make it pass; what it is for at this stage is measurement.
+   The assertion is the target and is not to be weakened.
+
+   Assembling each module alone shows where each one thinks it lives:
+
+   | Module | Bytes | First spans |
+   |---|---|---|
+   | `AS2ROM` | 4,096 | `3000-3FFF` |
+   | `ASTRD2` | 11,523 | `2800-2988`, `4000-4008`, … |
+   | `AST2RT` | 198 | `0000-0001`, `0005-000A`, … |
+   | `AS2POK` | 764 | `0000-0230`, … |
+   | `XYSIG` | 277 | `0000-0114` |
+   | `A2EARO` | 884 | `0000-001D`, … |
+   | *(and six more)* | | all from `0000` |
+   | `AS2FIL`, `A2GOOF` | 0 | nothing at all |
+
+   **Only the two `.ASECT` modules are placed.** Every `.CSECT` module starts at
+   zero and overwrites the last, exactly as item 3c predicted from the static
+   survey and as item 3g could not yet observe. The oracle occupies
+   `0000-0005`, `3000-8F52` and `8FFA-8FFF`; we write 2,087 addresses it never
+   writes — the pile below `3000` — and miss 8,705 it does.
+
+   **This supersedes 3g's "sections are still not shown to be the blocker".**
+   They were not shown because assembly failed too early to reach the question;
+   with the visibility fix in 3i the image gets far enough to answer it. The
+   remaining 731 errors and the placement problem are now separable concerns,
+   and placement is the larger one: it accounts for essentially all 17,994
+   differing bytes, while the undefined symbols are concentrated in the
+   `.GLOBB` scratch page.
+
+   `AS2FIL.MAC` and `A2GOOF.MAC` emitting **zero bytes** is unexplained and is
+   not obviously a section problem — worth its own look before the section
+   model is designed around them.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
