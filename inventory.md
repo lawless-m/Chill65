@@ -782,6 +782,62 @@ structured-control-flow route at all.
    dominant remaining error by a wide margin, and everything after it is
    carried along.
 
+3r. **The layout re-anchored, and 3q's arithmetic corrected.** With `.VCTRS`,
+   the delimited-argument and the export fixes in, the section chain is exact
+   from the origin all the way to `AS2IRQ`:
+
+   | Section | Our base | Size | Oracle | Delta |
+   |---|---|---|---|---|
+   | `MULTB` | `6D5C` | `0100` | — | — |
+   | `EXPIC` | `6E5C` | `0020` | — | — |
+   | `ROCKDAT` | `6E7C` | `0069` | — | — |
+   | `AST2RT` | `6EE5` | `0157` | `6EE5` | **0** |
+   | `AS2SAC` | `703C` | `0084` | `703C` | **0** |
+   | `AS2POK` | `70C0` | `035A` | — | — |
+   | `~blank@AS2COI` | `741A` | `010F` | `741A` | **0** |
+   | `A2NAME` | `7529` | `0207` | — | — |
+   | `AS2MSG` | `7730` | `05D5` | `7730` | **0** |
+   | `A2FILL` | `7D05` | `0327` | `7D05` | **0** |
+   | `AS2TST` | `802C` | `060D` | `802C` | **0** |
+   | `AS2IRQ` | `8639` | `010E` | `8639` | **0** |
+   | `A2EARO` | `8747` | `05E9` | `8747` | **0** |
+   | `XYSIG` | `8D30` | `010F` | — | −3 |
+   | `VGUTR2` | `8E3F` | `0101` | `8E42` | −3 |
+   | `~blank@A2GOOF` | `8F40` | `0010` | `8F43` | −3 |
+
+   **Correction to 3q.** That item claimed `AS2TST`'s section had to be 2,232
+   bytes. It does not: the claim assumed `A2FILL` ends at `7D84`, and the
+   missing bytes were `AS2MSG`'s, not `AS2TST`'s. `AS2TST` is `060D` at `802C`,
+   and `AS2MSG` is `05D5` — both now exact. The 1,864-byte overshoot 3q
+   reported is gone; what is left is 3 bytes.
+
+3s. **The last 3 bytes, located exactly — and they are an over-shrink, not a
+   shortfall.** Walking our image from `AS2IRQ`'s base and resynchronising
+   against the oracle: 776 bytes match, then one byte is missing at `8952`, two
+   more at `896B`, and the remaining **1,396 bytes match to the end**. Both
+   sites are inside `A2EARO`.
+
+   The second site is `A2EARO.MAC:405-408`, `LDA GAME / ASL / CLC / ADC GAME`.
+   We emit `a5 34 ... 65 34` — zero page. The original emitted
+   `ad 34 00 ... 6d 34 00` — absolute, for a symbol whose value *is* `0034`.
+   So this is the reverse of every sizing bug so far: we are shrinking an
+   operand the original deliberately left wide.
+
+   **This is a genuine counter-example to item 3p's build-wide `.GLOBB`.**
+   `A2EARO` declares `.GLOBL GAME`; `A2NAME` declares `.GLOBB GAME`. Under a
+   build-wide rule `GAME` is byte-sized everywhere, which is what makes us
+   shrink it — and it is exactly the shape of the `$CNCT` case that motivated
+   the rule, where `COIN65` declares `.GLOBL $CNCT`, `ASTRD2` declares
+   `.GLOBB $CNCT`, and the original *did* size it zero page. In both cases the
+   `.GLOBB` module precedes the using module in link order, so ordering does
+   not separate them.
+
+   **But per-unit `.GLOBB` is not the answer either — that was measured, not
+   assumed.** Restoring the per-unit rule takes the gate from **71.74% to
+   60.00%**. Build-wide is right in aggregate and `GAME` is a real exception,
+   so something narrower than either rule distinguishes the two. Left for the
+   census (item to come); not guessed at here.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
