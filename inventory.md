@@ -370,6 +370,51 @@ structured-control-flow route at all.
    should resolve across units; that they do not is the question §7 item 3a's
    linking work has to answer, and it is no longer masked by a macro.
 
+3f. **AST2RD.MAC is damaged, ASTRD2.MAC is not, and the Phase 1 target should
+   change.** This corrects item 3b above, which named `AST2RD.LDA` as the
+   target and put `ASTRD2` out of scope, and it qualifies item 3a's
+   "no corruption found" — that check verified block structure, padding,
+   include resolution and macro expansion. It did not verify that the source
+   was *complete*, and a file listing cannot show that either.
+
+   Same toolchain, the two roots assembled alone:
+
+   | Root | Errors |
+   |---|---|
+   | `AST2RD.MAC` | **3,401** |
+   | `ASTRD2.MAC` | **413** |
+
+   Five independent signs point the same way:
+
+   - **A region of ~1,000 lines in AST2RD.MAC is absent from ASTRD2.MAC
+     entirely.** `CNTSCL`, `VGADD2`, `VGSTAT`, `SCRCLR` and `VGRTSL` occur
+     175-351 times each in AST2RD.MAC and **zero** times in ASTRD2.MAC.
+   - **It uses macros defined nowhere in the archive.** `LALJSR` and `LXHJSR`
+     appear 175 times each, only in AST2RD.MAC, and no `.MACRO` defines either.
+   - **Those symbols are defined nowhere either** — not in any of the fifteen
+     link modules, nor the macro packages. The original LINKM run could not
+     have resolved them, so this text cannot be what was built.
+   - **AST2RD.MAC has no `.END`.** It is the only *root* module lacking one;
+     the other seven files without it are include files, which legitimately
+     have none.
+   - **`SDGEN2.COM` contains a verbatim fragment of exactly that region** —
+     lines 3094-3099. Item 3b noted SDGEN2.COM holds leftover source in blocks
+     a previous file once occupied. Blocks moved between these two files, which
+     is what a damaged or partially recovered RT-11 volume looks like.
+
+   ASTRD2.MAC by contrast has its `.END`, lacks the anomalous region, is the
+   later release (item 3b), and pairs with `ASTRD2.LDA` — which is the same
+   1,002 records over `0000-8FFF` as `AST2RD.LDA`.
+
+   **Recommendation: target `ASTRD2.MAC` → `ASTRD2.LDA`.** The build recipe in
+   `SDGEN1.COM` still stands for the other fourteen modules; only the root
+   changes. Residual uncertainty worth stating: an alternative reading is that
+   AST2RD.MAC is simply an older revision against a vector library that was
+   later renamed. That would not explain macros used 175 times and defined
+   nowhere, nor the missing `.END`, nor the block leakage into SDGEN2.COM — but
+   it has not been positively excluded, and the 413 errors ASTRD2.MAC still
+   reports have not yet been diagnosed.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
