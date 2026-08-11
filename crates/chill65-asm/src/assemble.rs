@@ -179,6 +179,16 @@ pub struct Assembler<'a> {
     /// the point of use called it an import and sized it absolute, where the
     /// original assembled `65 26` — zero page.
     pub unit_defined: HashMap<String, HashSet<String>>,
+    /// Every name each unit declares `.GLOBL`/`.GLOBB` anywhere in it, carried
+    /// from the probe.
+    ///
+    /// Like `unit_defined`, and for the same reason: `define` asks whether the
+    /// name has been declared global, and that is a fact about the unit rather
+    /// than about how far pass one has read. `AS2DEC.MAC`'s HEAD macro writes
+    /// the assignment first and the declaration two lines later —
+    /// `NAME'8 = ...` then `.GLOBL NAME'8` — so every symbol it defines was
+    /// invisible to the other modules.
+    pub unit_global_decls: HashMap<String, HashSet<String>>,
     /// Current local-label region. `N$` labels are scoped between ordinary
     /// labels, so the same `10$` recurs all through the corpus.
     local_scope: u32,
@@ -293,6 +303,7 @@ impl<'a> Assembler<'a> {
             unit_locals: HashMap::new(),
             defined_here: HashSet::new(),
             unit_defined: HashMap::new(),
+            unit_global_decls: HashMap::new(),
             section: None,
             abs_loc: 0,
             sec_order: Vec::new(),
@@ -343,6 +354,7 @@ impl<'a> Assembler<'a> {
                 self.place_sections(&probe.sec_order, &probe.sec_size);
             }
             self.unit_defined = std::mem::take(&mut probe.unit_defined);
+            self.unit_global_decls = std::mem::take(&mut probe.unit_global_decls);
         }
         for pass in 1..=2 {
             // The layout is fixed; the counters that produce it are not, and
@@ -424,7 +436,11 @@ impl<'a> Assembler<'a> {
                     .get(*root_name)
                     .cloned()
                     .unwrap_or_default();
-                self.global_decls.clear();
+                self.global_decls = self
+                    .unit_global_decls
+                    .get(*root_name)
+                    .cloned()
+                    .unwrap_or_default();
                 // `byte_globals` is deliberately NOT cleared. A `.GLOBB`
                 // declares that the symbol *is a byte*, which is a fact about
                 // the symbol rather than about the unit that mentions it, and
@@ -449,6 +465,8 @@ impl<'a> Assembler<'a> {
                 self.park_section();
                 self.unit_defined
                     .insert(root_name.to_string(), self.defined_here.clone());
+                self.unit_global_decls
+                    .insert(root_name.to_string(), self.global_decls.clone());
                 self.unit_locals
                     .insert(root_name.to_string(), self.locals.clone());
             }
@@ -3025,6 +3043,39 @@ mod tests {
         assert_eq!(img.get(&0x0202), Some(&0x00), "B's PRIV is B's");
         // And a private name never leaks into the shared table.
         assert!(!a.globals.contains_key("PRIV"));
+    }
+
+    #[test]
+    fn a_globl_after_the_definition_still_exports_it() {
+        // Whether a name is declared global is a fact about the unit, not about
+        // how far pass one has read. `AS2DEC.MAC`'s HEAD macro writes the
+        // assignment first and the declaration two lines after it:
+        //
+        // ```text
+        // .MACRO HEAD NAME
+        // NAME'8 = ...
+        // NAME'9 = ...
+        // .GLOBL NAME'8
+        // .GLOBL NAME'9
+        // ```
+        //
+        // Consulting the declaration set at the moment of definition therefore
+        // exported nothing HEAD produced, and every `BOX18`/`WNDSE9` in the
+        // build came up undefined.
+        let p = provider(&[
+            (
+                "A.MAC",
+                "	.MACRO HEAD NAME\nNAME'8 = 05\n	.GLOBL NAME'8\n	.ENDM\n\
+                 	HEAD BOX1\n	HEAD WNDSE\n",
+            ),
+            ("B.MAC", "	.=0A000\n	.BYTE BOX18\n	.BYTE WNDSE8\n"),
+        ]);
+        let mut a = Assembler::new(&p);
+        let img = a.assemble_units(&["A.MAC", "B.MAC"]).expect("assembly failed");
+
+        assert_eq!(a.globals.get("BOX18"), Some(&5), "declared after definition");
+        assert_eq!(a.globals.get("WNDSE8"), Some(&5));
+        assert_eq!(bytes(&img, 0xA000, 2), vec![0x05, 0x05], "another unit sees them");
     }
 
     #[test]
