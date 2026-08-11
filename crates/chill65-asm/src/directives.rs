@@ -14,6 +14,9 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
     Asect,
+    /// `.CSECT [name]` / `.PSECT [name]` — a relocatable section. Each distinct
+    /// name has its own location counter; the linker places them.
+    Csect,
     Radix,
     Byte,
     Word,
@@ -75,7 +78,8 @@ pub enum Dir {
 pub fn classify(name: &str) -> Option<Dir> {
     let n = name.to_ascii_uppercase();
     Some(match n.as_str() {
-        ".ASECT" | ".CSECT" | ".PSECT" => Dir::Asect,
+        ".ASECT" => Dir::Asect,
+        ".CSECT" | ".PSECT" => Dir::Csect,
         ".RADIX" => Dir::Radix,
         ".BYTE" => Dir::Byte,
         ".ASCII" => Dir::Ascii,

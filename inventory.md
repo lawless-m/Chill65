@@ -621,6 +621,61 @@ structured-control-flow route at all.
    still sizes differently from the original. That is a real remaining
    difference and should be run down rather than absorbed into a base guess.
 
+3m. **Sections built, and the origin is derived rather than chosen.**
+   `.CSECT`/`.PSECT` are now distinct from `.ASECT`: each named section has its
+   own location counter, offsets carry **across units** so two modules
+   contributing to one section concatenate, and a bare `.CSECT` is a section in
+   its own right rather than a synonym for absolute.
+
+   Placement needs sizes, and sizes need an assembly, so any build containing a
+   section runs twice: a throwaway probe on a fresh assembler measures every
+   section at a provisional base, then the real run assembles against the
+   layout. The provisional base only has to sit above `0x100` — sizes come from
+   offsets, and the one thing a base can influence is whether an operand looks
+   zero-page, which it does not at either the probe's base or the real ones.
+
+   **The origin, `6D5C`, is measured.** Running the probe's sizes back from
+   each oracle anchor gives the origin that anchor implies, and the first three
+   agree exactly:
+
+   | Section | Anchor | Cumulative before it | Implied origin |
+   |---|---|---|---|
+   | `AST2RT` | `6EE5` | `0189` | **`6D5C`** |
+   | `AS2SAC` | `703C` | `02E0` | **`6D5C`** |
+   | `AS2POK` | `70C0` | `0364` | **`6D5C`** |
+   | `AS2MSG` | `7730` | `08C5` | `6E6B` |
+   | `AS2TST` | `7FAB` | `0F19` | `7092` |
+   | `AS2IRQ` | `8639` | `2200` | `6439` |
+
+   It also **predicts** `A2NAME` at `741A`, which the oracle confirms
+   independently. Anchors further down imply other origins, but an origin is
+   only as good as every size preceding it — those are accumulated size errors,
+   not disagreement about where the region begins.
+
+   The program gate moves **51.19% → 56.37%** (16,082 differing bytes, down
+   from 17,994). Crystal Castles is untouched at 16384/16384 and 24576/24576 —
+   it contains no `.CSECT`, so the probe never runs on it.
+
+3n. **Next lead: the blank section may be the default, not absolute.**
+   `AS2COI` and `A2GOOF` declare no section at all, in themselves or in
+   anything they include, so today they assemble absolute from `0000` — and the
+   gate's first difference is still at `0000`, where the oracle has nothing.
+   But `AS2COI` anchors at `741A` in the oracle, on two agreeing runs.
+
+   In MACRO-11 the default at the start of a unit is the **blank section**, not
+   the absolute one; `.ASECT` is an explicit switch into absolute. If that holds
+   here, `AS2COI` and `A2GOOF` belong in the same blank section that
+   `AS2TST.MAC`'s bare `.CSECT` opens, which would place them rather than pile
+   them at zero.
+
+   **The risk is exactly what makes it worth testing rather than assuming.**
+   Crystal Castles has no `.CSECT`, but if any of its modules also lack
+   `.ASECT`, defaulting to the blank section would move their content. Its gate
+   decides, as it did for 3i and 3k.
+
+   Also still open from 3j: `AS2FIL` and `A2GOOF` emit **zero bytes**, and
+   `AST2RT`'s two anchors remain 3 bytes apart.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 

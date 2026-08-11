@@ -174,7 +174,63 @@ pub struct Assembler<'a> {
     /// Current local-label region. `N$` labels are scoped between ordinary
     /// labels, so the same `10$` recurs all through the corpus.
     local_scope: u32,
+
+    // ---- relocatable sections ----
+    //
+    // Crystal Castles has no `.CSECT` at all, so none of this is reachable on
+    // that corpus and its output cannot move. Space Duel links fifteen modules,
+    // most of them relocatable, and `SDGEN1.COM`'s order is the link order.
+    /// The section being assembled into, or `None` for the absolute section.
+    section: Option<String>,
+    /// The absolute location counter, parked while a `.CSECT` is open.
+    abs_loc: u16,
+    /// Section names in first-encounter order — the order they are laid out in.
+    pub sec_order: Vec<String>,
+    /// Each section's running offset, carried **across units** so that two
+    /// modules contributing to one section concatenate rather than overlap.
+    sec_off: HashMap<String, u16>,
+    /// The high-water offset each section reached: its size.
+    pub sec_size: HashMap<String, u16>,
+    /// Where each section was placed. Empty during the sizing probe.
+    pub sec_base: HashMap<String, u16>,
+    /// True while measuring sizes, before any base is known.
+    probing: bool,
 }
+
+/// The name given to `.CSECT` with no operand.
+///
+/// `AS2TST.MAC` opens a bare `.CSECT` *and* a named one, so "no operand" cannot
+/// be read as "absolute" — it is a section in its own right, distinct from
+/// every named one.
+const UNNAMED_SECTION: &str = "~blank";
+
+/// Where the relocatable sections begin.
+///
+/// Derived, not chosen. Assembling each module alone and searching `ASTRD2.LDA`
+/// for its longest byte runs locates it: `AST2RT` at `6EE5`, `AS2SAC` `703C`,
+/// `AS2POK` `70C0`, `AS2MSG` `7730`, `AS2TST` `7FAB`, `A2IRQ` `8639` on four
+/// independent agreeing runs, `VGUTR2` `8E42`. Those rise monotonically in
+/// `SDGEN1.COM`'s link order, which is concatenation; running the measured
+/// sizes back from the first anchored module gives this origin. `inventory.md`
+/// §7 item 3l records the measurement.
+///
+/// Running the measured sizes back from each anchor gives the origin it
+/// implies, and the first three agree exactly: `AST2RT` `6EE5 - 0189`,
+/// `AS2SAC` `703C - 02E0`, `AS2POK` `70C0 - 0364`, all `6D5C`. It then predicts
+/// `A2NAME` at `741A`, which is an address the oracle confirms independently.
+/// Anchors further down the chain imply other origins, but that is accumulated
+/// error in the sizes before them, not disagreement about where the region
+/// starts — an origin is only as good as every size preceding it.
+const SECTION_ORIGIN: u16 = 0x6D5C;
+
+/// The base every section is given during the sizing probe.
+///
+/// Any value at or above `0x100` does: sizes come from offsets, not from where
+/// the probe happened to put things, and the only thing the base can influence
+/// is whether an operand looks zero-page. Since the real bases are all well
+/// above `0x100` too, the probe and the real run agree on every operand width,
+/// which is the property that makes a two-stage layout sound.
+const PROBE_BASE: u16 = 0x8000;
 
 type Line<'t> = &'t [Token];
 
@@ -218,6 +274,13 @@ impl<'a> Assembler<'a> {
             local_scope: 0,
             unit_locals: HashMap::new(),
             defined_here: HashSet::new(),
+            section: None,
+            abs_loc: 0,
+            sec_order: Vec::new(),
+            sec_off: HashMap::new(),
+            sec_size: HashMap::new(),
+            sec_base: HashMap::new(),
+            probing: false,
         }
     }
 
@@ -239,8 +302,32 @@ impl<'a> Assembler<'a> {
     /// `RS.KEY::`. Pass one sizes such a reference as absolute (it is
     /// unresolved at the time), and pass two replays that decision, matching
     /// what a separate assembly plus linker would have produced.
+    ///
+    /// # Relocatable sections
+    ///
+    /// A `.CSECT` has no address of its own; the linker decides where it goes,
+    /// and it cannot decide until it knows how big every section is. So when
+    /// any section is present the work is done twice: a throwaway probe on a
+    /// fresh assembler measures the sections, [`Self::place_sections`] lays them
+    /// out, and the real run assembles against those bases. Crystal Castles has
+    /// no `.CSECT` anywhere, so the probe never runs there and its output cannot
+    /// move.
     pub fn assemble_units(&mut self, roots: &[&str]) -> Result<BTreeMap<u16, u8>, Vec<String>> {
+        if !self.probing && self.sec_base.is_empty() {
+            let mut probe = Assembler::new(self.provider);
+            probe.probing = true;
+            let _ = probe.assemble_units(roots);
+            if !probe.sec_order.is_empty() {
+                self.place_sections(&probe.sec_order, &probe.sec_size);
+            }
+        }
         for pass in 1..=2 {
+            // The layout is fixed; the counters that produce it are not, and
+            // both passes must walk them identically.
+            self.section = None;
+            self.abs_loc = 0;
+            self.sec_off.clear();
+            self.sec_size.clear();
             self.pass = pass;
             self.image.clear();
             self.errors.clear();
@@ -264,7 +351,12 @@ impl<'a> Assembler<'a> {
             }
 
             for root_name in roots {
-                // Per-unit state. Globals and the image deliberately persist.
+                // Per-unit state. Globals and the image deliberately persist,
+                // and so do the section offsets — that is what makes two
+                // modules contributing to one section concatenate rather than
+                // land on top of each other. Each unit starts absolute.
+                self.section = None;
+                self.abs_loc = 0;
                 self.loc = 0;
                 self.radix = 16;
                 self.ama = false;
@@ -294,6 +386,8 @@ impl<'a> Assembler<'a> {
                     continue;
                 };
                 self.run_source(root_name, &raw);
+                // Whatever section the unit ended in, record where it got to.
+                self.park_section();
                 self.unit_locals
                     .insert(root_name.to_string(), self.locals.clone());
             }
@@ -923,7 +1017,19 @@ impl<'a> Assembler<'a> {
         }
 
         match d {
-            Dir::Asect | Dir::Nocross | Dir::Ignored => {}
+            Dir::Nocross | Dir::Ignored => {}
+
+            Dir::Asect => self.enter_section(None),
+            Dir::Csect => {
+                let name = match args.iter().find_map(|t| match &t.tok {
+                    Tok::Symbol(s) => Some(s.to_ascii_uppercase()),
+                    _ => None,
+                }) {
+                    Some(n) => n,
+                    None => UNNAMED_SECTION.to_string(),
+                };
+                self.enter_section(Some(name));
+            }
 
             Dir::Nchr => self.nchr(args),
 
@@ -1437,6 +1543,62 @@ impl<'a> Assembler<'a> {
                     Cond::Dif => a != b,
                     _ => unreachable!(),
                 })
+            }
+        }
+    }
+
+    /// Lay the measured sections out end to end from [`SECTION_ORIGIN`], in
+    /// first-encounter order.
+    ///
+    /// First-encounter order is link order: the roots are assembled in
+    /// `SDGEN1.COM`'s sequence, so a section is met when the first module
+    /// contributing to it is read. The measured bases rise monotonically in
+    /// that same order (`inventory.md` §7 item 3l), which is what concatenation
+    /// looks like from the outside.
+    pub fn place_sections(&mut self, order: &[String], sizes: &HashMap<String, u16>) {
+        let mut addr = SECTION_ORIGIN;
+        for name in order {
+            self.sec_base.insert(name.clone(), addr);
+            addr = addr.wrapping_add(sizes.get(name).copied().unwrap_or(0));
+        }
+    }
+
+    /// Park the current section's offset and its high-water mark.
+    ///
+    /// Both matter. The offset is where the *next* contribution to this section
+    /// resumes, which is what makes two modules concatenate; the high-water
+    /// mark is the section's size, which is what decides where the next section
+    /// starts.
+    fn park_section(&mut self) {
+        let Some(cur) = self.section.clone() else {
+            self.abs_loc = self.loc;
+            return;
+        };
+        let base = self.sec_base.get(&cur).copied().unwrap_or(PROBE_BASE);
+        let off = self.loc.wrapping_sub(base);
+        self.sec_off.insert(cur.clone(), off);
+        let high = self.sec_size.entry(cur).or_insert(0);
+        if off > *high {
+            *high = off;
+        }
+    }
+
+    /// Switch location counters. `None` is the absolute section.
+    fn enter_section(&mut self, name: Option<String>) {
+        self.park_section();
+        match name {
+            Some(n) => {
+                if !self.sec_order.contains(&n) {
+                    self.sec_order.push(n.clone());
+                }
+                let base = self.sec_base.get(&n).copied().unwrap_or(PROBE_BASE);
+                let off = self.sec_off.get(&n).copied().unwrap_or(0);
+                self.loc = base.wrapping_add(off);
+                self.section = Some(n);
+            }
+            None => {
+                self.loc = self.abs_loc;
+                self.section = None;
             }
         }
     }
@@ -2779,6 +2941,77 @@ mod tests {
         assert_eq!(img.get(&0x0202), Some(&0x00), "B's PRIV is B's");
         // And a private name never leaks into the shared table.
         assert!(!a.globals.contains_key("PRIV"));
+    }
+
+    #[test]
+    fn two_units_contributing_to_one_section_concatenate() {
+        // A `.CSECT` has no address of its own. Two modules that open the same
+        // one are appending to a single region, so the second starts where the
+        // first stopped — the property that makes fifteen separately-assembled
+        // modules link into one image.
+        let p = provider(&[
+            ("A.MAC", "	.CSECT SHARED\n	.BYTE 011,022,033\n"),
+            ("B.MAC", "	.CSECT SHARED\n	.BYTE 044,055\n"),
+        ]);
+        let mut a = Assembler::new(&p);
+        let img = a.assemble_units(&["A.MAC", "B.MAC"]).expect("assembly failed");
+        let base = a.sec_base["SHARED"];
+        assert_eq!(base, SECTION_ORIGIN, "the first section starts at the origin");
+        assert_eq!(bytes(&img, base, 5), vec![0x11, 0x22, 0x33, 0x44, 0x55]);
+        assert_eq!(a.sec_size["SHARED"], 5, "the section is as big as both parts");
+    }
+
+    #[test]
+    fn sections_are_laid_out_end_to_end_in_first_encounter_order() {
+        // Layout is concatenation in the order the sections are met, which is
+        // link order because the roots are read in link order. A symbol defined
+        // inside one resolves to base+offset everywhere, including from a unit
+        // that cannot see the definition.
+        let p = provider(&[
+            ("A.MAC", "	.CSECT ONE\n	.BYTE 0,0,0,0\nMARK::	.BYTE 099\n"),
+            ("B.MAC", "	.CSECT TWO\n	.BYTE 077\n"),
+            ("C.MAC", "	.=0A000\n	.WORD MARK\n"),
+        ]);
+        let mut a = Assembler::new(&p);
+        let img = a
+            .assemble_units(&["A.MAC", "B.MAC", "C.MAC"])
+            .expect("assembly failed");
+
+        assert_eq!(a.sec_base["ONE"], SECTION_ORIGIN);
+        assert_eq!(a.sec_base["TWO"], SECTION_ORIGIN + 5, "TWO follows ONE's five bytes");
+        assert_eq!(bytes(&img, SECTION_ORIGIN + 5, 1), vec![0x77]);
+
+        // The symbol is base+offset, and the third unit sees it.
+        let mark = SECTION_ORIGIN + 4;
+        assert_eq!(a.globals.get("MARK"), Some(&mark));
+        assert_eq!(bytes(&img, 0xA000, 2), vec![(mark & 0xFF) as u8, (mark >> 8) as u8]);
+    }
+
+    #[test]
+    fn asect_returns_to_the_absolute_counter_and_a_blank_csect_is_its_own_section() {
+        // Two rules at once, because `AS2TST.MAC` exercises both: it opens a
+        // bare `.CSECT` *and* a named one, so "no operand" cannot be read as
+        // "absolute"; and `.ASECT` goes back to the absolute counter where it
+        // left off rather than to zero.
+        let p = provider(&[(
+            "A.MAC",
+            "	.ASECT\n	.=0A000\n	.BYTE 011\n\
+             	.CSECT\n	.BYTE 0AA,0BB\n\
+             	.CSECT NAMED\n	.BYTE 0CC\n\
+             	.ASECT\n	.BYTE 022\n",
+        )]);
+        let mut a = Assembler::new(&p);
+        let img = a.assemble("A.MAC").expect("assembly failed");
+
+        // `.ASECT` resumed at A001, not at 0 and not inside a section.
+        assert_eq!(bytes(&img, 0xA000, 2), vec![0x11, 0x22]);
+        // The blank section is a section, and a different one from NAMED.
+        let blank = a.sec_base[UNNAMED_SECTION];
+        let named = a.sec_base["NAMED"];
+        assert_eq!(blank, SECTION_ORIGIN);
+        assert_eq!(named, SECTION_ORIGIN + 2, "NAMED follows the blank section's two bytes");
+        assert_eq!(bytes(&img, blank, 2), vec![0xAA, 0xBB]);
+        assert_eq!(bytes(&img, named, 1), vec![0xCC]);
     }
 
     #[test]
