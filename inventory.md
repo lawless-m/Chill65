@@ -273,6 +273,68 @@ structured-control-flow route at all.
    control fact that makes this safe to build: its output must be unchanged by
    any of it.
 
+3d. **Triage of the 15-module assembly, and it has one dominant cause.**
+   Assembling all fifteen program modules together through `assemble_units` in
+   SDGEN1.COM order reports **7,805 errors**:
+
+   | Count | Kind |
+   |---|---|
+   | 5,426 | undefined symbol (285 distinct) |
+   | 2,026 | cascade — "requires an operand" |
+   | 347 | cascade — "branch out of range" |
+   | 6 | **expression ended unexpectedly** |
+
+   The two cascade kinds are not independent: an undefined operand reports both
+   `undefined symbol X` *and* `OPCODE requires an operand`, proved on a
+   three-line synthetic file. So 2,373 of these are echoes.
+
+   The undefined symbols break down, and the shape is the finding:
+
+   | Count | Symbol | What it is |
+   |---|---|---|
+   | 1,887 | `...4` | `ASCIN` macro internal |
+   | 993 | `...C` | `ASCIN` macro internal |
+   | 525 | `~L311$90/100/130` | HLL65F generated labels |
+   | 1,076 | `CNTSCL`, `VGADD2`, `VGSTAT`, `SCRCLR`, `VGRTSL` | defined **and** `.GLOBL`-exported by AST2RD.MAC |
+   | rest | `TEMP1`-`TEMP9`, `VGLIST`, `HSCORE`, `ONTIME` … | also defined in AST2RD.MAC |
+
+   **Almost all of it traces to one unimplemented directive.** `AST2RD.MAC:206`
+   defines a macro `ASCIN` that converts a string to the game's own character
+   codes, and its first act is `.NCHR ...C,<STRING>` — set `...C` to the
+   character count. `.NCHR` does not exist in `chill65-asm`: 0 uses in Crystal
+   Castles, 5 in Space Duel. `...C` is therefore never defined, `...4` never
+   assigned, and the macro fails everywhere it is used. Because AST2RD.MAC is
+   also where the vector-generator entry points and the scratch symbols are
+   defined and exported, its failure orphans every module that imports them —
+   which is why symbols that *are* present and *are* exported still read as
+   undefined.
+   
+   That reframes the middle rows of the table: `CNTSCL` and friends are not
+   missing link-time imports. They are casualties.
+
+   **Category (b), parse and dialect, is not near zero as expected.** Two gaps:
+   `.NCHR`, and the six `expression ended unexpectedly` errors, which come from
+   the same macro — `...4=''...5` uses `''` as MACRO-11's character-value
+   operator, and the lexer currently treats `'` only as the concatenation mark
+   (`lexer.rs` leaves it as an uninterpreted `Tok::Quote` for `macros.rs` to
+   decide). Five `.NCHR` uses and six `''` expressions, in one macro, account
+   for the bulk of 7,805 errors.
+
+   **Category (c), the section model, cannot yet be observed as image
+   collisions** because assembly never completes. The static evidence stands
+   though: eleven named `.CSECT`s plus one unnamed, and **not one of the CSECT
+   modules uses an explicit `.=`**, so every one of them is purely relocatable
+   and currently assembles from `loc = 0` (`assemble.rs:260`, with
+   `.ASECT`/`.CSECT`/`.PSECT` all folded to a no-op at `directives.rs:66`).
+   They would overwrite each other wholesale. Nothing about that changes the
+   plan; it confirms the section work is necessary and not merely tidy.
+
+   Suggested order, which differs from the plan's: `.NCHR` and the `''`
+   character-value operator are worth clearing **before** the section model, on
+   the evidence above — the error count should collapse by an order of
+   magnitude and expose whatever is actually underneath, rather than building
+   sections against a signal dominated by one macro.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
