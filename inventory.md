@@ -720,6 +720,68 @@ structured-control-flow route at all.
    anchor. Also still open: `AS2FIL` and `A2GOOF` emit zero bytes (3j), and
    `AST2RT`'s two anchors sit 3 bytes apart (3l).
 
+3p. **Three more rules, all measured, and the layout is now exact through
+   `AS2MSG`.** Chasing one instruction — `COIN65.MAC`'s `ADC $CNCT`, which the
+   original assembles `65 26` (zero page) where we emitted `6d 26 00` — turned
+   up two corrections, and locating `A2GOOF`'s own bytes turned up a third.
+
+   1. **Being an import is a whole-unit fact.** `COIN65.MAC` uses several names
+      well before the blocks that define them, and consulting `defined_here` at
+      the point of use called them imports and sized them absolute. The section
+      probe now runs for **every** build, not only those with sections, and
+      hands back what each unit defines anywhere.
+
+   2. **`.GLOBB` is not scoped to the unit that writes it.** It says the symbol
+      *is a byte* — a fact about the symbol, which the linker carries across the
+      program. `$CNCT` is declared `.GLOBB` in `ASTRD2.MAC` and used unprefixed
+      by `COIN65.MAC`, which declares only `.GLOBL` for it. Crystal Castles is
+      the control and stays exact: its one `.GLOBB` names `$INTCT` and
+      `ATRACT`, while `SN.NUM`, declared only `.GLOBL`, stays absolute.
+
+      This forced the `.GLOBB` test's control to be **rewritten rather than
+      kept**. It had asserted per-unit scoping by asking one unit to treat a
+      byte symbol as wide, which under a build-wide rule asks the linker to
+      hold two answers at once. It now uses a second symbol nothing declares
+      `.GLOBB`, and additionally asserts byte-ness reaching a unit that never
+      declared it.
+
+   3. **The blank section belongs to a unit, not to the program.** A named
+      `.CSECT` is shared; the blank one is not. The oracle puts `AS2COI`'s blank
+      content at `741A` and `A2GOOF`'s at `8F43` — two and a half kilobytes
+      apart, each immediately behind whatever precedes it in link order.
+      Merging them dropped `A2GOOF`'s sixteen bytes at `741A` as well and
+      pushed every section after it sixteen bytes late.
+
+   **Correction to 3j.** `AS2FIL` and `A2GOOF` do *not* emit zero bytes. The
+   probe read `Assembler::image` after a clean `assemble_units`, which
+   `mem::take`s the image into the `Ok` value. `A2GOOF` emits its sixteen bytes
+   — `78 8d 0b 10 ...`, the code that had been sitting at `0000` — and `AS2FIL`
+   emits 807 into `A2FILL`. `AS2FIL`'s `.REPT 327` is also correct: `.RADIX 16`
+   is in force, so it is 807, not 327.
+
+   **The gate: 51.19% -> 60.16%** across these. Crystal Castles never moved.
+
+3q. **What is left, and how it was measured.** Anchoring must use the **full
+   build's** bytes, not a module assembled alone — a standalone module's
+   internal offsets are not the ones it ships with, and the earlier `AS2TST`
+   and `AS2IRQ` anchors were computed that way and are unreliable. Re-anchored
+   against the full build:
+
+   | Section | Our base | True base | Out by |
+   |---|---|---|---|
+   | `AST2RT` | `6EE5` | `6EE5` | **0** |
+   | `AS2SAC` | `703C` | `703C` | **0** |
+   | `~blank@AS2COI` | `741A` | `741A` | **0** |
+   | `~blank@A2GOOF` | `968B` | `8F43` | -1864 |
+
+   So the layout is exact through the blank section, and by the end of the
+   image our cumulative is **1,864 bytes too large**. Working backwards from
+   `A2GOOF` at `8F43`: `VGUTR2` `8E42`, `XYSIG` `8D33`, `A2EARO` `874A`,
+   `AS2IRQ` `863C`. Forward from `A2FILL`'s end at `7D84`, that makes
+   **`AS2TST`'s section 2,232 bytes, where we measure 4,732** — it is the
+   dominant remaining error by a wide margin, and everything after it is
+   carried along.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
