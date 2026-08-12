@@ -905,12 +905,12 @@ structured-control-flow route at all.
    `$CNCT` links at `0026`. Every assembled plain-`$CNCT` site, ours against
    the oracle:
 
-   | Source | Address | Ours | Oracle | Size |
-   |---|---|---|---|---|
-   | `COIN65:490` `ADC $CNCT` | `74A7` | `65 26` | `65 26` | zero page |
-   | `COIN65:491` `STA $CNCT` | `74A9` | `85 26` | `85 26` | zero page |
-   | `COIN65:590` `ADC $CNCT` | `74E4` | `65 26` | `65 26` | zero page |
-   | `COIN65:605` `STA $CNCT` | `74F8` | `85 26` | `85 26` | zero page |
+   | Source | Address | Ours | Original |
+   |---|---|---|---|
+   | `COIN65:490` `ADC $CNCT` | `74A7` | zero page | zero page |
+   | `COIN65:491` `STA $CNCT` | `74A9` | zero page | zero page |
+   | `COIN65:590` `ADC $CNCT` | `74E4` | zero page | zero page |
+   | `COIN65:605` `STA $CNCT` | `74F8` | zero page | zero page |
 
    All four are zero page in the original, and all four match. **`AS2COI` does
    not appear in the census at all** — its region is byte-identical in the
@@ -927,16 +927,16 @@ structured-control-flow route at all.
    the shift accrues one byte at a time across three plain (unprefixed)
    references in `BOOK`:
 
-   | Source | Oracle | Ours | |
+   | Source | Original | Ours | Shift |
    |---|---|---|---|
-   | `A2EARO.MAC:386` `LDA GAME` | `8941` `AD 34 00` | `8941` `A5 34` | +1 |
-   | `A2EARO.MAC:405` `LDA GAME` | `8966` `AD 34 00` | `8965` `A5 34` | +2 |
-   | `A2EARO.MAC:408` `ADC GAME` | `896D` `6D 34 00` | `8969` `65 34` | +3 |
+   | `A2EARO.MAC:386` `LDA GAME` | `8941` absolute | `8941` zero page | +1 |
+   | `A2EARO.MAC:405` `LDA GAME` | `8966` absolute | `8965` zero page | +2 |
+   | `A2EARO.MAC:408` `ADC GAME` | `896D` absolute | `8969` zero page | +3 |
 
-   The surrounding code confirms the attribution exactly: `F8 A0 00` (`SED` /
-   `LDY #0`, lines 384-385) precedes the first, and `0A 0A AA 18` then four
-   `JSR ADGMTM` follow it (lines 387-394). Our `896D` re-synchronises with the
-   oracle's `8970` and stays in step, so the whole shift is these three bytes
+   The surrounding code confirms the attribution exactly: `SED` / `LDY #0`
+   (lines 384-385) precedes the first, and `ASL` / `ASL` / `TAX` / `CLC` then
+   four `JSR ADGMTM` follow it (lines 387-394). Our `896D` re-synchronises with
+   the original's `8970` and stays in step, so the whole shift is these bytes
    and nothing else. `A2EARO`, `XYSIG`, `VGUTR2` and `A2GOOF`'s blank section
    then inherit it.
 
@@ -957,6 +957,58 @@ structured-control-flow route at all.
    the other way round — `zp_ok = byte_sized || (ama && v < 0x100)`, so `AMA`
    *permits* the short form. Whether inverting that fits every row is the next
    measurement, not a conclusion.
+
+3x. **The sizing rule, measured: `.ENABL AMA` confines the byte-hint to the
+   unit's own `.GLOBB`.** Every plain (auto-sized) reference in the build was
+   enumerated from the sources and cross-referenced against the per-unit
+   declaration closure (following `.INCLUDE`, so `AS2COI` carries `COIN65`'s
+   declarations and `AST2RD` carries `ASTRD2`'s). The evidence table:
+
+   | # | Unit | Source | Symbol | Decl here | `.GLOBB` in | AMA | Ours | Original |
+   |---|---|---|---|---|---|---|---|---|
+   | 1 | `A2EARO` | `:386` `LDA GAME` | `GAME`=`0034` | `.GLOBL` :28 | `A2NAME` | on | zp | **abs** |
+   | 2 | `A2EARO` | `:405` `LDA GAME` | `GAME` | `.GLOBL` :28 | `A2NAME` | on | zp | **abs** |
+   | 3 | `A2EARO` | `:408` `ADC GAME` | `GAME` | `.GLOBL` :28 | `A2NAME` | on | zp | **abs** |
+   | 4 | `AS2COI` | `COIN65:490/491/590/605` | `$CNCT`=`0026` | `.GLOBL` :125 | `A2NAME`, `ASTRD2` | off | zp | zp |
+   | 5 | `AS2COI` | `COIN65:603/604` `INC $$CRDT` | `$$CRDT`=`0020` | none | `A2NAME`, `ASTRD2` | off | zp | zp |
+   | 6 | `A2EARO` | own-`.GLOBB` externals (`TEMP7`, `ATRACT`, `LANG`, `FRAME`, `TEMPC`, …) | | `.GLOBB` :31,36-38,40,42 | self | on | zp | zp |
+   | 7 | `AS2TST` | `:543`, `:827` `FRAME` | `FRAME` | defined here `:14` | six units | on | zp | zp |
+   | 8 | `ASTRD2` | 38 plain `GAME`, `POINT`, `TOGDRONE` | | defined here | elsewhere | on | zp | zp |
+
+   Row 6 is not a single site but a collective measurement, and it is the
+   strongest row in the table: `A2EARO`'s `8747..8940` matches at shift `+0`
+   with **zero** differences (506/506), and `896D..8D2F` holds at exactly `+3`
+   and never drifts further. Every own-`.GLOBB` external in the unit is
+   therefore sized as the original sized it. Rows 7 and 8 are locally defined,
+   so no hint is involved — the value is simply known.
+
+   The `.REPT 0` blocks in `COIN65` (lines 225-251) are documentation, not
+   code: `$CNCT`, `$$CRDT` and `$CCTIM` are never defined in `AS2COI`, so rows
+   4 and 5 really are undefined externals.
+
+   **Three candidates die on the table:**
+
+   - *A local `.GLOBL` overrides inherited byte-ness* — dead on row 4.
+     `COIN65:125` declares `.GLOBL $CNCT` and the original still sized it zero
+     page.
+   - *Byte-ness is purely per-unit, never inherited* — dead on rows 4 and 5.
+     Neither `$CNCT` nor `$$CRDT` is declared `.GLOBB` anywhere in `AS2COI`'s
+     closure, and both are zero page.
+   - *Under AMA the byte-hint is ignored entirely* — dead on row 6.
+
+   **The one rule that fits every row:** a plain reference to a symbol not
+   defined in the current unit is byte-sized when the current unit itself
+   declares it `.GLOBB`; failing that, it inherits byte-ness from other units
+   **only if the current unit has not enabled `.ENABL AMA`**. Under AMA an
+   external the unit has not itself declared `.GLOBB` is sized absolute.
+
+   The rule was chosen for fitting the table, but the size of its blast radius
+   is worth stating: enumerating every plain reference in all fifteen units,
+   the set where this rule disagrees with our current one is **exactly the
+   three `GAME` instructions of rows 1-3**. Nothing else in the build changes.
+   The residue it cannot explain is separate content divergence — 86 bytes in
+   `A2EARO` past the shift, 5 in `XYSIG`, 5 in `VGUTR2` — which belongs with
+   the `3500-3FFF` cluster, not with sizing.
 
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
