@@ -1010,6 +1010,38 @@ structured-control-flow route at all.
    `A2EARO` past the shift, 5 in `XYSIG`, 5 in `VGUTR2` — which belongs with
    the `3500-3FFF` cluster, not with sizing.
 
+3y. **The rule implemented: 88.83% → 93.25%, and the shift is gone.**
+   `byte_external` in `assemble.rs` now consults a per-unit `byte_decls` set
+   (probe-collected into `unit_byte_decls`, exactly as `unit_global_decls` is,
+   so a declaration late in a unit still governs a use early in it) before
+   falling back to the build-wide `byte_globals` — and the fallback applies
+   only while `.ENABL AMA` is off.
+
+   | | Before | After |
+   |---|---|---|
+   | Space Duel `PROGRAM` | 32,748 / 36,864 (88.83%) | **34,377 / 36,864 (93.25%)** |
+   | differing bytes | 4,116 | 2,487 |
+   | Space Duel `SHIP` | 2,048 / 2,048 | 2,048 / 2,048 |
+   | Crystal Castles `DATA` | 16,384 / 16,384 | 16,384 / 16,384 |
+   | Crystal Castles `PROGRAM` | 24,576 / 24,576 | 24,576 / 24,576 |
+
+   Crystal Castles, the control, did not move. The census now shows **no
+   differing bytes at all** in `A2EARO`, `XYSIG`, `VGUTR2`, `AS2IRQ` or
+   `A2GOOF`'s blank section — the four regions that inherited the shift are
+   byte-identical, and `8940-8990` has no differing run left. That is 1,629
+   bytes recovered from a three-byte cause.
+
+   Two things came out better than 3x predicted. The ~5 residual bytes forecast
+   for `XYSIG` and `VGUTR2` were artefacts of measuring a `+3` window past a
+   section end, not real content divergence — both are exact. And `AS2TST` fell
+   from 57 differing bytes to 8, which the shift analysis had not attributed to
+   this cause at all.
+
+   What remains is 2,391 bytes in the absolute region — the `3500-3FFF` vector
+   tables, unchanged and untouched by this — plus 96 bytes scattered across
+   `ROCKDAT` (36), `AS2POK` (30), `EXPIC` (18), `AS2TST` (8), `A2NAME` (3) and
+   `AS2MSG` (1).
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 

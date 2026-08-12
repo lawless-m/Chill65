@@ -92,6 +92,12 @@ pub struct Assembler<'a> {
     /// even though it cannot see the value. That is the whole point of the
     /// directive, and it is why it is not a synonym for `.GLOBL`.
     pub byte_globals: HashSet<String>,
+    /// The subset of `byte_globals` the **current unit** declares itself.
+    ///
+    /// `.ENABL AMA` confines the byte hint to this set: see `byte_decls`'s use
+    /// in the operand sizing below. Restored from `unit_byte_decls` at unit
+    /// start, so a declaration late in a unit still governs a use early in it.
+    pub byte_decls: HashSet<String>,
     pub image: BTreeMap<u16, u8>,
     loc: u16,
     radix: u32,
@@ -189,6 +195,9 @@ pub struct Assembler<'a> {
     /// `NAME'8 = ...` then `.GLOBL NAME'8` — so every symbol it defines was
     /// invisible to the other modules.
     pub unit_global_decls: HashMap<String, HashSet<String>>,
+    /// Every name each unit declares `.GLOBB` anywhere in it, carried from the
+    /// probe — the `.GLOBB`-only counterpart of `unit_global_decls`.
+    pub unit_byte_decls: HashMap<String, HashSet<String>>,
     /// Current local-label region. `N$` labels are scoped between ordinary
     /// labels, so the same `10$` recurs all through the corpus.
     local_scope: u32,
@@ -270,6 +279,7 @@ impl<'a> Assembler<'a> {
             globals: HashMap::new(),
             global_decls: HashSet::new(),
             byte_globals: HashSet::new(),
+            byte_decls: HashSet::new(),
             image: BTreeMap::new(),
             loc: 0,
             radix: 16,
@@ -304,6 +314,7 @@ impl<'a> Assembler<'a> {
             defined_here: HashSet::new(),
             unit_defined: HashMap::new(),
             unit_global_decls: HashMap::new(),
+            unit_byte_decls: HashMap::new(),
             section: None,
             abs_loc: 0,
             sec_order: Vec::new(),
@@ -355,6 +366,7 @@ impl<'a> Assembler<'a> {
             }
             self.unit_defined = std::mem::take(&mut probe.unit_defined);
             self.unit_global_decls = std::mem::take(&mut probe.unit_global_decls);
+            self.unit_byte_decls = std::mem::take(&mut probe.unit_byte_decls);
         }
         for pass in 1..=2 {
             // The layout is fixed; the counters that produce it are not, and
@@ -441,6 +453,11 @@ impl<'a> Assembler<'a> {
                     .get(*root_name)
                     .cloned()
                     .unwrap_or_default();
+                self.byte_decls = self
+                    .unit_byte_decls
+                    .get(*root_name)
+                    .cloned()
+                    .unwrap_or_default();
                 // `byte_globals` is deliberately NOT cleared. A `.GLOBB`
                 // declares that the symbol *is a byte*, which is a fact about
                 // the symbol rather than about the unit that mentions it, and
@@ -467,6 +484,8 @@ impl<'a> Assembler<'a> {
                     .insert(root_name.to_string(), self.defined_here.clone());
                 self.unit_global_decls
                     .insert(root_name.to_string(), self.global_decls.clone());
+                self.unit_byte_decls
+                    .insert(root_name.to_string(), self.byte_decls.clone());
                 self.unit_locals
                     .insert(root_name.to_string(), self.locals.clone());
             }
@@ -821,13 +840,37 @@ impl<'a> Assembler<'a> {
         // ...unless the declaration was `.GLOBB`, which says the import is
         // byte-sized. Then the unit *can* size it short without seeing the
         // value, and that is the only reason to write `.GLOBB` instead of
-        // `.GLOBL`. It is independent of AMA: `VGUTR2.MAC` has no `.ENABL` at
-        // all and two `.GLOBB` declarations, so a rule that only widened what
-        // AMA already permits would do nothing there.
+        // `.GLOBL`.
+        //
+        // How far that hint reaches depends on `.ENABL AMA`. A unit's own
+        // `.GLOBB` always applies. A `.GLOBB` made in some *other* unit reaches
+        // this one only while AMA is off — under AMA an import the unit has not
+        // itself declared byte-sized is assembled absolute.
+        //
+        // Measured, not assumed. `A2EARO.MAC` enables AMA at line 4, declares
+        // `.GLOBL ... GAME` at line 28, and never declares `GAME` byte-sized;
+        // the sole `.GLOBB GAME` in the build is `A2NAME.MAC:21`. The original
+        // assembles all three of `A2EARO`'s plain uses (`:386`, `:405`, `:408`)
+        // absolute. `AS2COI.MAC` enables AMA nowhere, declares only
+        // `.GLOBL ... $CNCT` (via `COIN65.MAC:125`), and the original assembles
+        // its plain `$CNCT` uses zero page — so the cross-unit hint does carry,
+        // and it is AMA that withdraws it.
+        //
+        // The hint is not withdrawn wholesale under AMA: `A2EARO` declares
+        // `.GLOBB TEMP7,ATRACT,LANG,FRAME,...` itself and the original sizes
+        // every one of those zero page, which is why the test is per-unit
+        // rather than simply `!self.ama`.
+        //
+        // Crystal Castles is the control and stays exact: its one `.GLOBB`
+        // names `$INTCT` and `ATRACT` and sits in the same unit that uses them,
+        // so the own-declaration arm covers it either way.
         let byte_external = rest.iter().any(|t| match &t.tok {
             Tok::Symbol(n) => {
                 let k = intern(n);
-                self.byte_globals.contains(&k) && !self.defined_here.contains(&k)
+                if self.defined_here.contains(&k) {
+                    return false;
+                }
+                self.byte_decls.contains(&k) || (!self.ama && self.byte_globals.contains(&k))
             }
             _ => false,
         });
@@ -1265,6 +1308,7 @@ impl<'a> Assembler<'a> {
                         self.global_decls.insert(intern(s));
                         if d == Dir::Globb {
                             self.byte_globals.insert(intern(s));
+                            self.byte_decls.insert(intern(s));
                         }
                     }
                 }
@@ -3297,6 +3341,62 @@ mod tests {
             bytes(&img, 0xB000, 2),
             vec![0xA5, 0x90],
             "`.GLOBB` reaches a unit that never declared it"
+        );
+    }
+
+    #[test]
+    fn ama_confines_the_byte_hint_to_the_units_own_globb() {
+        // How far a `.GLOBB` reaches depends on `.ENABL AMA` in the unit doing
+        // the referencing. Its own declaration always applies; one made in
+        // another unit applies only while AMA is off.
+        //
+        // Measured from Space Duel. `A2EARO.MAC` enables AMA, declares
+        // `.GLOBL ... GAME`, and never declares `GAME` byte-sized — the only
+        // `.GLOBB GAME` in the build is `A2NAME.MAC`'s. The original assembles
+        // `A2EARO`'s three plain uses absolute. `AS2COI.MAC` is the same shape
+        // without AMA, and the original assembles its plain `$CNCT` uses zero
+        // page.
+        //
+        // `WIDE` is the symbol under test and `OWNED` is the control that keeps
+        // the rule honest: if AMA simply discarded the hint, `OWNED` would go
+        // absolute too, and `A2EARO`'s own `.GLOBB TEMP7,ATRACT,LANG,...` are
+        // zero page in the original.
+        let p = provider(&[
+            ("A.MAC", "	.=0090\nWIDE::	.BLKB 1\nOWNED::	.BLKB 1\n"),
+            // An earlier unit says both symbols are bytes, and uses neither.
+            ("B.MAC", "	.GLOBB WIDE,OWNED\n"),
+            // AMA on. `WIDE` is declared here only `.GLOBL`; `OWNED` is
+            // declared `.GLOBB` here as well as in B.
+            (
+                "C.MAC",
+                "	.ENABL AMA\n	.GLOBL WIDE\n	.GLOBB OWNED\n	.=0C000\n	LDA WIDE\n	LDA OWNED\n",
+            ),
+            // Same declarations as C's `WIDE` case, but no AMA.
+            ("D.MAC", "	.GLOBL WIDE\n	.=0D000\n	LDA WIDE\n"),
+        ]);
+        let mut a = Assembler::new(&p);
+        let img = a
+            .assemble_units(&["A.MAC", "B.MAC", "C.MAC", "D.MAC"])
+            .expect("assembly failed");
+
+        // The A2EARO case: AMA withdraws another unit's hint.
+        assert_eq!(
+            bytes(&img, 0xC000, 3),
+            vec![0xAD, 0x90, 0x00],
+            "under AMA, a `.GLOBB` made in another unit does not reach this one"
+        );
+        // The control. Same unit, same AMA, but declared `.GLOBB` here.
+        assert_eq!(
+            bytes(&img, 0xC003, 2),
+            vec![0xA5, 0x91],
+            "the unit's own `.GLOBB` still applies under AMA"
+        );
+        // The AS2COI case: without AMA the hint carries across units, which is
+        // what the previous test establishes and this one must not undo.
+        assert_eq!(
+            bytes(&img, 0xD000, 2),
+            vec![0xA5, 0x90],
+            "without AMA, another unit's `.GLOBB` reaches this one"
         );
     }
 
