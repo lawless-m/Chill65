@@ -27,6 +27,8 @@
 //! - [`input`] — switches and the trackball counters, plus the host API.
 //! - [`vg`] — the vector generator: Space Duel's display hardware, which has
 //!   no bitmap at all and executes a display list instead.
+//! - [`sd`] — the Space Duel bus, a second machine beside the Crystal Castles
+//!   one: RAM, the vector windows, the switch ports and the watchdog.
 //!
 //! POKEY and input arrive in subsequent tasks; see `LOOP.md`.
 
@@ -39,6 +41,7 @@ pub mod input;
 pub mod machine;
 pub mod motion;
 pub mod pokey;
+pub mod sd;
 pub mod vg;
 pub mod video;
 
@@ -49,5 +52,6 @@ pub use frame::{run_frame, run_frame_with, Compiled, FrameStats, NoCompiled};
 pub use input::{Input, Switch};
 pub use machine::Machine;
 pub use pokey::Pokey;
+pub use sd::{SdInput, SdMachine};
 pub use vg::{Segment, Stop, Vg};
 pub use video::Video;
