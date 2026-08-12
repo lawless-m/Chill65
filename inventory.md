@@ -889,6 +889,38 @@ structured-control-flow route at all.
    found Punct(':')` — the source there reads `PARAMS:` tab `:LDA I,0`, a label
    whose second colon is separated from the first.
 
+3v. **The `$CNCT` zero-page evidence re-measured, and it holds.** The claim in
+   3u was made by reasoning rather than by reading bytes, so it was re-taken
+   against the current build before any rule was designed around it.
+
+   `AS2COI` sets `BONADD=1`, `EMCTRS=3`; `COIN65` then defaults `MECHS=3`,
+   which defaults `MULTS=1`, `MODES=4`, `SEPCCT=0`, and `CCTRS=EMCTRS=3`. Those
+   values select `COIN65:490-491` (via the `.IFTF` at 482, since
+   `<MULTS-1>!<CCTRS-1>` is 2, not 0) and `COIN65:590` and `605` (via
+   `.IF EQ,MODES-4`). `COIN65:529` is on the `MULTS=0` path and never
+   assembles — the bytes confirm it: the run continues `F6 27 CA`
+   (`INC X,$CCTIM` / `DEX`, lines 543 and 549), so neither the `.IFT` at 492
+   nor the `.IFF` at 509 contributed.
+
+   `$CNCT` links at `0026`. Every assembled plain-`$CNCT` site, ours against
+   the oracle:
+
+   | Source | Address | Ours | Oracle | Size |
+   |---|---|---|---|---|
+   | `COIN65:490` `ADC $CNCT` | `74A7` | `65 26` | `65 26` | zero page |
+   | `COIN65:491` `STA $CNCT` | `74A9` | `85 26` | `85 26` | zero page |
+   | `COIN65:590` `ADC $CNCT` | `74E4` | `65 26` | `65 26` | zero page |
+   | `COIN65:605` `STA $CNCT` | `74F8` | `85 26` | `85 26` | zero page |
+
+   All four are zero page in the original, and all four match. **`AS2COI` does
+   not appear in the census at all** — its region is byte-identical in the
+   current build. So the contradiction with `GAME` is real and survives: both
+   symbols are declared `.GLOBL` in the using unit and `.GLOBB` elsewhere in
+   the build, yet the original sizes one zero page and the other absolute.
+
+   The one property that separates them is `.ENABL AMA`: `A2EARO` has it,
+   `AS2COI` does not.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
