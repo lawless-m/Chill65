@@ -1,25 +1,78 @@
 # Phase 1 gate — reassembly against the `.LDA` oracle
 
-**Status: PASSED. Both images are byte-identical to the original toolchain's own
-output.**
+**Status: PASSED for both titles. Every image is byte-identical to the original
+toolchain's own output.**
 
-| Image | Oracle | Result |
-|---|---|---|
-| Castle data (`C99`) | `C99.LDA` | **16,384 of 16,384 — byte-identical** |
-| Program (`CRF`+`CRP`+`CLS`) | `version-3/CRF.LDA` | **24,576 of 24,576 — byte-identical** |
+| Title | Image | Oracle | Result |
+|---|---|---|---|
+| Crystal Castles | Castle data (`C99`) | `C99.LDA` | **16,384 of 16,384 — byte-identical** |
+| Crystal Castles | Program (`CRF`+`CRP`+`CLS`) | `version-3/CRF.LDA` | **24,576 of 24,576 — byte-identical** |
+| Space Duel | Ship (`A2SHIP`) | `A2SHIP.LDA` | **2,048 of 2,048 — byte-identical** |
+| Space Duel | Program (fifteen modules) | `ASTRD2.LDA` | **36,864 of 36,864 — byte-identical** |
 
 Reproduce with:
 
 ```
 CHILL65_CORPUS=/path/to/crystal-castles \
   cargo test -p chill65-asm --test gate -- --ignored --nocapture
+
+CHILL65_CORPUS=/path/to/space-duel \
+  cargo test -p chill65-asm --test gate_sd -- --ignored --nocapture
 ```
 
-That command is the Phase 1 gate, and `tests/gate.rs` asserts equality — not a
-tolerance. The oracle is the assembled output shipped in the source tree, so no
-ROM set is required and nothing game-derived enters this repository.
+Those commands are the Phase 1 gate, and both `tests/gate.rs` and
+`tests/gate_sd.rs` assert equality — not a tolerance. The oracles are the
+assembled output shipped in the source trees, so no ROM set is required and
+nothing game-derived enters this repository.
+
+**Crystal Castles is the control.** It has no `.CSECT` anywhere, so none of the
+section-layout machinery Space Duel needs is reachable on it and its output
+cannot move. Several plausible rules were killed by watching those two images
+stay exact while a proposed change made Space Duel worse; the discipline is
+worth keeping for any future title.
+
+## 0a. Space Duel — the five rules that closed 4,116 bytes
+
+Space Duel is the harder case: fifteen separately assembled modules linked
+together, where Crystal Castles is a single root that includes everything. It
+went from not building at all to byte-identical. The full derivation is in
+`inventory.md` §7 items 3a–3z; the rules, in the order they were measured:
+
+| Rule | Bytes |
+|---|---|
+| `.ENABL AMA` confines the `.GLOBB` byte hint to the unit's own declarations | 1,629 |
+| `/` is signed and truncates toward zero | 2,423 |
+| a blank is a character to `.IRPC`, and it ends a joined symbol name | 33 |
+| the second colon of a global label may be separated from the first | 1 |
+| a doubled concatenation mark may straddle two expansions | 30 |
+
+Two are worth singling out.
+
+**Signed division** cost far more than its size suggests. `AS2ROM`'s `VCTRSC`
+macro rounds a signed displacement with `..2=DY-<..SCAL/2>/..SCAL`, and
+MACRO-11 evaluates left to right, so at `..SCAL=2` and `DY=-32` that is
+`(-32-1)/2`. Unsigned division makes it `-17` rather than `-16` — and being
+*odd* is what mattered, because it fails the macro's short-vector test
+`..5&0FFE1` and emits the two-word long form where the original emits one word.
+That added 86 bytes across the vector tables, moved `CNTSCL` from `3EC2` to
+`3F18`, and corrupted every `JSRL` referring to it as far back as `3000`. One
+operator, 2,423 bytes.
+
+**The straddling concatenation mark** was the subtlest. `AS2POK`'s `OFFSET`
+macro writes `LABEL''X''Y` with `.IRPC X` inside `.IRPC Y`. Expanding the macro
+binds only `LABEL`, so the first mark is the macro's and the second belongs to
+the `X` loop. Consuming both fused the mark character into the name — `SF` and
+`'` became the symbol `SF'` — so no `.IF DF,LABEL''X''Y` could ever be true and
+all fourteen sound-pointer tables came out zero.
+
+**Six assembly errors remain**, all `expression ended unexpectedly`, none of
+them undefined symbols. Since the image is exact, none changes an emitted byte.
+They are the natural first call on Atari's own `atari_tools/OPC65.MAC` and
+LINKM sources — open question O1.
 
 ## 0. The two causes that closed the last 1,696 bytes
+
+*(Crystal Castles, historical.)*
 
 The program image sat at 93.10% with 1,696 differing bytes in 75 runs. They had
 exactly **two** causes, which is why they collapsed together rather than one at
@@ -200,11 +253,17 @@ Two smaller leads:
 
 ## 5. Regression guard
 
-`crates/chill65-asm/tests/gate.rs` now asserts **equality** on both images. The
-failure report is kept richly instrumented anyway — first differing address,
-both bytes, surrounding context, run structure, and the nearest preceding symbol
-with its defining unit — because if a regression ever lands, "images differ"
-would tell nobody anything.
+`crates/chill65-asm/tests/gate.rs` and `tests/gate_sd.rs` assert **equality** on
+all four images. The failure report is kept richly instrumented anyway — first
+differing address, both bytes, surrounding context, run structure, and the
+nearest preceding symbol with its defining unit — because if a regression ever
+lands, "images differ" would tell nobody anything.
+
+`gate_sd.rs`'s whole-image assertion was committed **deliberately failing**,
+months before it passed, and was never softened to the figure of the day. It
+now passes on its own strength. That is the standard for this project: when
+exact equality is out of reach, the divergence gets reported precisely and the
+assertion stays where it is.
 
 ## 6. The other two gate deliverables
 
