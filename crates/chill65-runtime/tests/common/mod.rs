@@ -92,3 +92,162 @@ pub fn motion_rom_image(corpus: &Path) -> Vec<u8> {
     );
     bytes[..MOB_LEN].to_vec()
 }
+
+// ---------------------------------------------------------------------------
+// Space Duel
+// ---------------------------------------------------------------------------
+
+use std::collections::BTreeMap;
+
+use chill65_asm::assemble::{Assembler, SourceProvider};
+
+/// The ship image: `A2SHIP.LDA`'s span, CPU `2800-2FFF`.
+pub const SD_SHIP_BASE: u16 = 0x2800;
+pub const SD_SHIP_LEN: usize = 0x0800;
+
+/// The program image: `AST2RD.LDA`'s span, CPU `0000-8FFF`.
+pub const SD_PROG_LEN: usize = 0x9000;
+
+/// The fifteen link units, in `SDGEN1.COM`'s order. Order is load-bearing:
+/// it decides where each `.CSECT` contribution lands.
+pub const SD_ROOTS: [&str; 15] = [
+    "AS2ROM.MAC",
+    "ASTRD2.MAC",
+    "AST2RT.MAC",
+    "AS2SAC.MAC",
+    "AS2POK.MAC",
+    "AS2COI.MAC",
+    "A2NAME.MAC",
+    "AS2MSG.MAC",
+    "AS2FIL.MAC",
+    "AS2TST.MAC",
+    "A2IRQ.MAC",
+    "A2EARO.MAC",
+    "XYSIG.MAC",
+    "VGUTR2.MAC",
+    "A2GOOF.MAC",
+];
+
+/// The assembly errors the fifteen-module link still reports.
+///
+/// All six are `expression ended unexpectedly` and none is an undefined
+/// symbol. `gate1.md` §0a records that the image is nevertheless *exact*, so
+/// none of them changes an emitted byte.
+///
+/// This is a pin, not a tolerance. If the count or the kind ever moves, the
+/// builders below fail loudly rather than quietly assembling something else:
+/// a seventh error would mean the image is no longer the one the gate proved.
+pub const SD_EXPECTED_ERRORS: usize = 6;
+pub const SD_EXPECTED_ERROR_TEXT: &str = "expression ended unexpectedly";
+
+struct SdSearch {
+    dir: PathBuf,
+}
+
+impl SourceProvider for SdSearch {
+    fn load(&self, name: &str) -> Option<Vec<u8>> {
+        for cand in [name.to_string(), format!("{name}.MAC")] {
+            if let Ok(b) = std::fs::read(self.dir.join(&cand)) {
+                return Some(b);
+            }
+        }
+        None
+    }
+}
+
+/// A Space Duel build: the image and every symbol the link resolved.
+pub struct SdBuild {
+    /// Address-keyed, exactly as the assembler produced it.
+    pub image: BTreeMap<u16, u8>,
+    /// `(address, name, unit)`, sorted — `"global"` for exported symbols.
+    pub symbols: Vec<(u16, String, String)>,
+}
+
+impl SdBuild {
+    /// Flatten a span into bytes, zero-filling anything unwritten.
+    pub fn bytes(&self, base: u16, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| {
+                self.image
+                    .get(&base.wrapping_add(i as u16))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
+    /// Look a symbol up by name, six-character truncated as MACRO-11 does.
+    pub fn symbol(&self, name: &str) -> Option<u16> {
+        let key: String = name.chars().take(6).collect();
+        self.symbols
+            .iter()
+            .find(|(_, n, _)| *n == key)
+            .map(|(a, _, _)| *a)
+    }
+}
+
+/// Assemble Space Duel, keeping the image on the error path.
+///
+/// This deliberately uses the assembler as a **library**. The CLI exits 1 on
+/// any error, and the fifteen-module link still reports six benign ones, so
+/// the `Command`-driven path the Crystal Castles builders use cannot work
+/// here. `Assembler` leaves `image` populated when `assemble_units` returns
+/// `Err`, which is what makes that recoverable — the same shape
+/// `chill65-asm/tests/gate_sd.rs` uses, copied rather than shared so neither
+/// can be bent out of shape by the other's needs.
+fn build_sd(corpus: &Path, roots: &[&str], expected_errors: usize) -> SdBuild {
+    let p = SdSearch {
+        dir: corpus.to_path_buf(),
+    };
+    let mut a = Assembler::new(&p);
+    let (image, errors) = match a.assemble_units(roots) {
+        Ok(img) => (img, Vec::new()),
+        Err(errs) => (std::mem::take(&mut a.image), errs),
+    };
+
+    assert_eq!(
+        errors.len(),
+        expected_errors,
+        "expected exactly {expected_errors} assembly errors for {roots:?}, got {}: {errors:#?}",
+        errors.len()
+    );
+    for e in &errors {
+        assert!(
+            e.contains(SD_EXPECTED_ERROR_TEXT),
+            "unexpected assembly error kind: {e}"
+        );
+    }
+
+    let mut symbols: Vec<(u16, String, String)> = a
+        .globals
+        .iter()
+        .map(|(k, v)| (*v, k.clone(), "global".to_string()))
+        .collect();
+    for (unit, table) in &a.unit_locals {
+        for (k, v) in table {
+            if !k.contains('~') {
+                symbols.push((*v, k.clone(), unit.clone()));
+            }
+        }
+    }
+    symbols.sort();
+    SdBuild { image, symbols }
+}
+
+/// The ship build, image and symbols. `A2SHIP.MAC` is a clean single-module
+/// assembly — no linker involved — so any error at all is a failure.
+pub fn build_sd_ship_full(corpus: &Path) -> SdBuild {
+    build_sd(corpus, &["A2SHIP.MAC"], 0)
+}
+
+/// The ship image alone, CPU `2800-2FFF`.
+pub fn build_sd_ship(corpus: &Path) -> Vec<u8> {
+    let bytes = build_sd_ship_full(corpus).bytes(SD_SHIP_BASE, SD_SHIP_LEN);
+    assert_eq!(bytes.len(), SD_SHIP_LEN, "ship image size");
+    bytes
+}
+
+/// The fifteen-module program link, CPU `0000-8FFF`, with its symbol table.
+pub fn build_sd_program(corpus: &Path) -> SdBuild {
+    build_sd(corpus, &SD_ROOTS, SD_EXPECTED_ERRORS)
+}
