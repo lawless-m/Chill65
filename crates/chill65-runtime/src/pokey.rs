@@ -595,6 +595,32 @@ pub struct Pokey {
     pub samples: Vec<u8>,
     /// Machine cycle the poly has been advanced to.
     pub advanced_to: u64,
+    /// The byte `ALLPOT` reads back — the eight pot lines as a bank.
+    ///
+    /// Zero by default, which is what Crystal Castles needs: that board reads
+    /// a trackball rather than paddles, and zero means "no pot still
+    /// counting", so anything polling for completion proceeds rather than
+    /// hangs. Leaving the default alone keeps its behaviour bit-identical.
+    ///
+    /// Space Duel puts its option switches here instead. `AS2DEC.MAC:149,159`
+    /// list "OPTN1 FROM POKEY1" and "OPTN2 FROM POKEY2", and `A2GOOF.MAC:17-18`
+    /// reads them with interrupts masked:
+    ///
+    /// ```text
+    /// SEI
+    /// STA POTGO+POKEY1
+    /// LDA ALLPOT+POKEY1
+    /// CLI
+    /// ```
+    ///
+    /// `POTGO` and `ALLPOT` back to back, and the byte used immediately after.
+    /// A real pot scan takes hundreds of cycles, so the board is not scanning
+    /// anything: the switch bank is presented combinatorially and `POTGO` is
+    /// vestigial here.
+    ///
+    /// **UNVERIFIED:** chip-level pot-scan timing, deliberately not modelled.
+    /// No code in either corpus can tell the difference, because neither waits.
+    pub pot_lines: u8,
 }
 
 impl Default for Pokey {
@@ -612,6 +638,7 @@ impl Pokey {
             record_audio: false,
             samples: Vec::new(),
             advanced_to: 0,
+            pot_lines: 0,
         }
     }
 
@@ -658,10 +685,12 @@ impl Pokey {
         self.advance_to(cycle);
         match index & 0x0F {
             reg::RANDOM => self.poly.random(),
-            // Pots idle. This board reads a trackball, not paddles; ALLPOT
-            // reads zero, meaning "no pot still counting", so anything that
-            // polled it for completion would proceed rather than hang.
-            0x00..=0x08 => 0,
+            // Individual pots idle. Neither board reads paddles.
+            0x00..=0x07 => 0,
+            // The pot lines as a bank. Zero unless a board drives them —
+            // see [`Pokey::pot_lines`] for why Space Duel does and Crystal
+            // Castles does not.
+            reg::ALLPOT => self.pot_lines,
             reg::KBCODE => 0,
             reg::SERIN => 0,
             // IRQST is active-low: all ones is "nothing pending". POKEY's IRQ
@@ -859,6 +888,27 @@ mod tests {
         }
         assert_eq!(p.read(reg::ALLPOT, 10), 0, "no pot still counting");
         assert_eq!(p.read(reg::IRQST, 10), 0xFF, "active low: nothing pending");
+    }
+
+    #[test]
+    fn allpot_reads_back_the_pot_lines() {
+        // Space Duel's option switches arrive here — `AS2DEC.MAC:149,159` and
+        // `A2GOOF.MAC:17-18`, which reads `ALLPOT` immediately after `POTGO`
+        // and uses the byte as the difficulty setting.
+        let mut p = running();
+        p.pot_lines = 0xA5;
+        assert_eq!(p.read(reg::ALLPOT, 10), 0xA5);
+
+        // The individual pots are a separate matter and stay idle: nothing on
+        // either board reads a paddle.
+        for i in 0..8 {
+            assert_eq!(p.read(i, 10), 0, "POT{i}");
+        }
+
+        // The control, and the reason Crystal Castles cannot move: a chip
+        // nobody drives still reads zero, which is "no pot still counting".
+        let mut fresh = running();
+        assert_eq!(fresh.read(reg::ALLPOT, 10), 0);
     }
 }
 
