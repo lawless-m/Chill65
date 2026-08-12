@@ -52,6 +52,6 @@ pub use frame::{run_frame, run_frame_with, Compiled, FrameStats, NoCompiled};
 pub use input::{Input, Switch};
 pub use machine::Machine;
 pub use pokey::Pokey;
-pub use sd::{SdInput, SdMachine};
+pub use sd::{run_frame_sd, SdInput, SdMachine};
 pub use vg::{Segment, Stop, Vg};
 pub use video::Video;

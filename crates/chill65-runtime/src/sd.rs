@@ -462,6 +462,86 @@ impl Bus for SdMachine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Frame timing
+// ---------------------------------------------------------------------------
+//
+// [`crate::frame`] is not modified: its scheduler is transcribed from Crystal
+// Castles RTL, is typed to `Machine`, and walks a 256-line video counter this
+// board does not have. A vector machine has no scanlines to walk.
+//
+// # The cadence, and how much of it is measured
+//
+// **Measured.** MAME's `spacduel` driver reports `clock="1512000"` for the
+// M6502 and `refresh="61.523438"` for the screen. Those two numbers divide
+// exactly:
+//
+// ```text
+// 1_512_000 / 61.523438  =  24_576 cycles per frame
+// 24_576 / 4             =   6_144 cycles per interrupt
+// ```
+//
+// **Derived from the game.** The frame is four interrupts because the game
+// says so. `A2IRQ.MAC:36-37` increments `SYNC` only when `INTRPT & 3` is zero,
+// and `ASTRD2.MAC:725-726` waits on `SYNC` with the comment "NOT 1/60 SEC
+// YET". So `SYNC` is the game's frame, and it is every fourth interrupt.
+//
+// **Corroborated.** `A2IRQ.MAC:44-46` increments `SECOND` when `INTRPT` wraps
+// — every 256 interrupts — and `A2IRQ.MAC:47-49` treats four of those as four
+// seconds. At 246.09 Hz that makes the game's "second" 1.04 s. The game is
+// approximating, and 256 is the round number a programmer picks; the agreement
+// is close enough to confirm the order of magnitude and rules out anything
+// near 60 Hz or 1 kHz.
+//
+// **UNVERIFIED.** The divider chain itself. One hypothesis worth recording as
+// dead: the interrupt is *not* the `0800` 3 kHz signal divided by twelve. That
+// would be 504 * 12 = 6,048 cycles, and the measured period is 6,144.
+
+use crate::cpu::{Cpu, CpuError};
+use crate::frame::FrameStats;
+
+/// CPU cycles in one frame — one `SYNC` tick. See the derivation above.
+pub const CYCLES_PER_FRAME: u32 = 24_576;
+
+/// Interrupts per frame. `A2IRQ.MAC:36-37`.
+pub const IRQS_PER_FRAME: u32 = 4;
+
+/// CPU cycles between interrupts, 6,144.
+pub const CYCLES_PER_IRQ: u32 = CYCLES_PER_FRAME / IRQS_PER_FRAME;
+
+/// Run one frame: four interrupt intervals.
+///
+/// Deadlines are absolute against the machine's own cycle counter, exactly as
+/// [`crate::frame::run_frame`] does it, so an instruction that overruns an
+/// interval steals from that interval only and the error cannot compound.
+///
+/// `irq_pending` is a **latched level**, not an edge: it stays set until the
+/// game writes `INTACK`, so a handler that runs with `I` set still takes the
+/// interrupt when it clears.
+pub fn run_frame_sd(cpu: &mut Cpu, m: &mut SdMachine) -> Result<FrameStats, CpuError> {
+    let start = m.cycles;
+    let mut stats = FrameStats::default();
+
+    for interval in 0..IRQS_PER_FRAME {
+        m.irq_pending = true;
+        stats.irqs_raised += 1;
+
+        let deadline = start + ((interval + 1) as u64) * CYCLES_PER_IRQ as u64;
+        while m.cycles < deadline {
+            if m.irq_pending && !cpu.interrupt_disable {
+                cpu.irq(m);
+                stats.irqs_taken += 1;
+                continue;
+            }
+            cpu.step(m)?;
+            stats.interpreted += 1;
+        }
+    }
+
+    stats.cycles = m.cycles - start;
+    Ok(stats)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,6 +796,169 @@ mod tests {
         m.write(0x0C80, 0);
         assert_eq!(m.vg_fault, Some(Stop::Budget));
         assert!(m.vg.halted, "the CPU still sees a finished frame");
+    }
+
+    // -----------------------------------------------------------------
+    // Frame timing
+    // -----------------------------------------------------------------
+
+    /// A machine running a spin loop with an interrupt handler that
+    /// acknowledges and feeds the watchdog, the way `A2IRQ.MAC:28` and
+    /// `ASTRD2.MAC:728` do.
+    fn machine_with_isr() -> (Cpu, SdMachine) {
+        let mut m = SdMachine::new();
+        let at = |addr: u16| (addr - 0x4000) as usize;
+
+        // 5000: JMP $5000, a spin loop.
+        m.prog[at(0x5000)..at(0x5000) + 3].copy_from_slice(&[0x4C, 0x00, 0x50]);
+        // 5100: STA INTACK (0E00), STA WTCHDG (0D00), RTI.
+        m.prog[at(0x5100)..at(0x5100) + 7]
+            .copy_from_slice(&[0x8D, 0x00, 0x0E, 0x8D, 0x00, 0x0D, 0x40]);
+
+        // The link puts the vectors at 8FFA-8FFF; the CPU fetches through the
+        // top-page mirror, so planting them here exercises that path too.
+        m.prog[at(0x8FFC)] = 0x00;
+        m.prog[at(0x8FFD)] = 0x50;
+        m.prog[at(0x8FFE)] = 0x00;
+        m.prog[at(0x8FFF)] = 0x51;
+
+        let mut cpu = Cpu::new();
+        cpu.reset(&mut m);
+        // Reset leaves `I` set, as the 6502 does. The real game clears it
+        // early in `PWRON`; these fixtures have no power-on path, so they
+        // clear it here. The masked-interrupt test sets it back deliberately.
+        cpu.interrupt_disable = false;
+        (cpu, m)
+    }
+
+    #[test]
+    fn the_cadence_derivation_closes() {
+        // MAME reports 1512000 Hz and 61.523438 Hz refresh, and those divide
+        // exactly. If either constant is edited without the other, this fails.
+        assert_eq!(CPU_HZ, 1_512_000);
+        assert_eq!(CYCLES_PER_FRAME, 24_576);
+        assert_eq!(CYCLES_PER_IRQ, 6_144);
+        let refresh = CPU_HZ as f64 / CYCLES_PER_FRAME as f64;
+        assert!(
+            (refresh - 61.523438).abs() < 0.001,
+            "frame rate {refresh} should be MAME's 61.523438"
+        );
+        // The 3 kHz signal is a different divider, and cannot be the source of
+        // the interrupt: twelve of its periods is 6048, not 6144.
+        assert_ne!(THREE_KHZ_HALF_PERIOD * 2 * 12, CYCLES_PER_IRQ as u64);
+    }
+
+    #[test]
+    fn exactly_four_interrupts_are_raised_and_taken_per_frame() {
+        let (mut cpu, mut m) = machine_with_isr();
+        let s = run_frame_sd(&mut cpu, &mut m).unwrap();
+        assert_eq!(s.irqs_raised, 4);
+        assert_eq!(s.irqs_taken, 4);
+        assert!(s.cycles >= CYCLES_PER_FRAME as u64);
+    }
+
+    #[test]
+    fn a_masked_interrupt_stays_latched_until_i_clears() {
+        let (mut cpu, mut m) = machine_with_isr();
+        cpu.interrupt_disable = true;
+        let s = run_frame_sd(&mut cpu, &mut m).unwrap();
+        assert_eq!(s.irqs_raised, 4);
+        assert_eq!(s.irqs_taken, 0, "masked");
+        assert!(m.irq_pending, "but still pending — it is a level, not an edge");
+
+        cpu.interrupt_disable = false;
+        let s = run_frame_sd(&mut cpu, &mut m).unwrap();
+        assert!(s.irqs_taken >= 1, "the latched request fires once unmasked");
+    }
+
+    #[test]
+    fn an_unacknowledging_handler_is_re_entered() {
+        let (mut cpu, mut m) = machine_with_isr();
+        let at = |addr: u16| (addr - 0x4000) as usize;
+        // An ISR that only feeds the watchdog and returns, never writing
+        // INTACK: the request stays asserted, so it fires again immediately.
+        m.prog[at(0x5100)..at(0x5100) + 4].copy_from_slice(&[0x8D, 0x00, 0x0D, 0x40]);
+        let s = run_frame_sd(&mut cpu, &mut m).unwrap();
+        assert!(
+            s.irqs_taken > 4,
+            "an unacknowledged level re-enters; took {}",
+            s.irqs_taken
+        );
+    }
+
+    #[test]
+    fn frame_length_does_not_drift_over_twenty_frames() {
+        let (mut cpu, mut m) = machine_with_isr();
+        let start = m.cycles;
+        for _ in 0..20 {
+            run_frame_sd(&mut cpu, &mut m).unwrap();
+        }
+        let elapsed = m.cycles - start;
+        let ideal = 20 * CYCLES_PER_FRAME as u64;
+        // Deadlines are absolute, so overshoot is bounded by one instruction
+        // per frame rather than accumulating.
+        assert!(
+            elapsed >= ideal && elapsed - ideal < 20 * 8,
+            "{elapsed} cycles against an ideal {ideal}"
+        );
+    }
+
+    #[test]
+    fn the_watchdog_survives_when_the_isr_feeds_it_and_starves_when_it_does_not() {
+        let (mut cpu, mut m) = machine_with_isr();
+        for _ in 0..40 {
+            run_frame_sd(&mut cpu, &mut m).unwrap();
+        }
+        assert!(!m.watchdog_expired);
+        assert!(m.watchdog_strobes >= 40 * 4);
+
+        // A machine that masks interrupts forever never reaches its handler.
+        let (mut cpu, mut m) = machine_with_isr();
+        cpu.interrupt_disable = true;
+        for _ in 0..40 {
+            run_frame_sd(&mut cpu, &mut m).unwrap();
+        }
+        assert!(m.watchdog_expired, "nothing fed it");
+    }
+
+    #[test]
+    fn the_three_khz_bit_toggles_at_its_documented_period() {
+        let (mut cpu, mut m) = machine_with_isr();
+        // Sample the bit across one frame and count the transitions. A frame
+        // is 24576 cycles and the half-period is 252, so the bit changes
+        // 24576/252 = 97 times to within one sample.
+        let mut last = m.read(0x0800) & 0x80;
+        let mut changes = 0;
+        let start = m.cycles;
+        while m.cycles - start < CYCLES_PER_FRAME as u64 {
+            cpu.step(&mut m).unwrap();
+            let now = m.read(0x0800) & 0x80;
+            if now != last {
+                changes += 1;
+                last = now;
+            }
+        }
+        let expected = CYCLES_PER_FRAME as u64 / THREE_KHZ_HALF_PERIOD;
+        assert!(
+            (changes as i64 - expected as i64).abs() <= 1,
+            "{changes} transitions in a frame, expected about {expected}"
+        );
+    }
+
+    #[test]
+    fn two_identically_driven_machines_stay_identical() {
+        // The runtime's contract is reproducibility byte for byte, and this is
+        // what makes a differential harness meaningful later.
+        let (mut cpu_a, mut m_a) = machine_with_isr();
+        let (mut cpu_b, mut m_b) = machine_with_isr();
+        for frame in 0..30 {
+            let a = run_frame_sd(&mut cpu_a, &mut m_a).unwrap();
+            let b = run_frame_sd(&mut cpu_b, &mut m_b).unwrap();
+            assert_eq!(a.cycles, b.cycles, "frame {frame}");
+            assert_eq!(a.irqs_taken, b.irqs_taken, "frame {frame}");
+            assert_eq!(m_a.cycles, m_b.cycles, "frame {frame}");
+            assert_eq!(m_a.frame_hash(), m_b.frame_hash(), "frame {frame}");
+        }
     }
 
     #[test]
