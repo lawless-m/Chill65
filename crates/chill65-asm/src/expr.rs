@@ -187,7 +187,23 @@ fn apply(op: Op, a: u16, b: u16, at: Option<&Token>) -> Result<u16, ExprError> {
                 // result. If the corpus ever trips it, that is worth knowing.
                 return Err(err("division by zero", at));
             }
-            a / b
+            // Signed, truncating toward zero — not the unsigned division the
+            // u16 operands invite.
+            //
+            // Measured from `AS2ROM.MAC`'s `VCTRSC` macro, which rounds a
+            // signed displacement with `..2=DY-<..SCAL/2>/..SCAL`. MACRO-11
+            // evaluates left to right with no precedence, so for
+            // `VCTRSC 8,-32,0` at `..SCAL=2` that is `(-32-1)/2`. The original
+            // makes it `-16`; unsigned division of `0FFDF` makes it `07FEF`,
+            // which masks to `-17`.
+            //
+            // The consequence is not one wrong word. `-17` is odd, so the
+            // macro's short-vector test `..5&0FFE1` fails and it emits the
+            // two-word long form where the original emits one word. Across the
+            // vector tables at `3500-3FFF` that added 86 bytes, moved `CNTSCL`
+            // from `3EC2` to `3F18`, and so corrupted every `JSRL` referring to
+            // it as far back as `3000`.
+            (a as i16).wrapping_div(b as i16) as u16
         }
         Op::And => a & b,
         Op::Or => a | b,
@@ -378,10 +394,43 @@ mod tests {
         // M6502.MAC TR16AI:  LDA I,FROM&^H0FF  /  LDA I,FROM&^H0FF00/^H100
         let s = syms(&[("FROM", 0xBEEF)]);
         assert_eq!(ev("FROM&^H0FF", 16, None, &s), Eval::Value(0xEF));
-        assert_eq!(ev("FROM&^H0FF00/^H100", 16, None, &s), Eval::Value(0xBE));
-        // Guard the reasoning: with conventional precedence the second would be
-        // FROM & (0xFF00/0x100) == FROM & 0xFF == 0xEF, the low byte.
+
+        // This once asserted 0x00BE. That was wrong about the intermediate,
+        // though right about the byte that matters: `/` is signed (see `apply`),
+        // so `0BE00/0100` is -16896/256 = -66 = 0FFBE, and it is the *low byte*
+        // of that which reaches the immediate. Every use of the idiom across
+        // both corpora — `M6502.MAC:57,166,200`, `CCT.MAC:731`,
+        // `AS2TST.MAC:833` — feeds an 8-bit operand, so none of them can tell
+        // 0FFBE from 0BE, and the Crystal Castles images stay exact either way.
+        assert_eq!(ev("FROM&^H0FF00/^H100", 16, None, &s), Eval::Value(0xFFBE));
+        assert_eq!(
+            match ev("FROM&^H0FF00/^H100", 16, None, &s) {
+                Eval::Value(v) => v as u8,
+                other => panic!("expected a value, got {other:?}"),
+            },
+            0xBE,
+            "the high byte is what the immediate takes"
+        );
+        // Guard the reasoning: with conventional precedence this would be
+        // FROM & (0xFF00/0x100) == FROM & 0xFF == 0xEF, the low byte. That
+        // control is the point of the test and can still fail.
         assert_ne!(ev("FROM&^H0FF00/^H100", 16, None, &s), Eval::Value(0xEF));
+    }
+
+    #[test]
+    fn division_is_signed_and_truncates_toward_zero() {
+        // `AS2ROM.MAC`'s `VCTRSC` rounds a signed displacement:
+        // `..2=DY-<..SCAL/2>/..SCAL`. Left to right at `..SCAL=2` and `DY=-32`
+        // that is `(-32-1)/2`, which the original makes -16 — truncating toward
+        // zero, not flooring, and not the 07FEF unsigned division would give.
+        let s = syms(&[]);
+        assert_eq!(ev("0-33/2", 10, None, &s), Eval::Value((-16i16) as u16));
+        // Flooring would be -17. The distinction is what decides whether the
+        // macro's `..5&0FFE1` short-vector test passes, so it changes how many
+        // words the vector occupies, not just their value.
+        assert_ne!(ev("0-33/2", 10, None, &s), Eval::Value((-17i16) as u16));
+        // Positive operands are unaffected, which is the bulk of the corpus.
+        assert_eq!(ev("33/2", 10, None, &s), Eval::Value(16));
     }
 
     #[test]
