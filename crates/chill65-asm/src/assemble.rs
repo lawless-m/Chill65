@@ -2134,6 +2134,51 @@ mod tests {
     }
 
     #[test]
+    fn a_doubled_concatenation_mark_may_straddle_two_expansions() {
+        // `AS2POK.MAC`'s `OFFSET` macro writes `LABEL''X''Y` with `.IRPC X`
+        // inside `.IRPC Y`. Expanding the macro binds only `LABEL`, so the
+        // first mark is the macro's and the second belongs to the `X` loop.
+        // Consuming both fused the mark character into the name — `SF` and `'`
+        // became the symbol `SF'` — and every `.IF DF,LABEL''X''Y` came out
+        // false.
+        //
+        // `SF1F`/`SF1A` are deliberately left undefined and `SF2F`/`SF2A`
+        // defined, so the expected bytes are 0, 0 and then two real offsets:
+        // the test fails if the join stops working *or* if it starts claiming
+        // symbols that do not exist.
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.RADIX 16\n\
+             	.MACRO OFFSET,LABEL\n\
+             	.IRPC X,<12>\n\
+             	.IRPC Y,FA\n\
+             	.IF DF,LABEL''X''Y\n\
+             	.BYTE <LABEL''X''Y-SOUND>/2-2\n\
+             	.IFF\n\
+             	.BYTE 0\n\
+             	.ENDC\n\
+             	.ENDR\n\
+             	.ENDR\n\
+             	.ENDM\n\
+             	.=0A000\n\
+             PNTRS:\n\
+             	OFFSET SF\n\
+             SOUND=.-6\n\
+             SF2F:	.BYTE 1,8,2,10\n\
+             	.BYTE 0,0\n\
+             SF2A:	.BYTE 87,20,0FE,4\n\
+             	.END\n",
+        )])
+        .expect("assembly failed");
+        let bytes: Vec<u8> = (0xA000u16..0xA004).filter_map(|a| img.get(&a).copied()).collect();
+        assert_eq!(
+            bytes,
+            vec![0, 0, 1, 4],
+            "undefined channels stay 0; SF2F and SF2A resolve to their offsets"
+        );
+    }
+
+    #[test]
     fn irpc_iterates_a_blank_and_the_join_stops_at_it() {
         // Two rules meet on one line, and the corpus needs both. `VGMC.MAC`'s
         // `ALPHA` is `.IRPC ...X,<STRING>` around `JSRL CHAR.'...X`, and

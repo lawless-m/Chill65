@@ -302,6 +302,21 @@ fn substitute(line: &[Token], bind: &[(String, Vec<Token>)]) -> Vec<Token> {
             while k < line.len() && is_mark(k) {
                 k += 1;
             }
+            // ...but only when both marks are *ours*. A doubled mark can
+            // straddle two expansions, and then the second one is not this
+            // expansion's to consume.
+            //
+            // `AS2POK.MAC`'s `OFFSET` macro writes `LABEL''X''Y` inside
+            // `.IRPC X` inside `.IRPC Y`. Expanding the macro binds only
+            // `LABEL`, so the first mark is its own and the second belongs to
+            // the `X` loop. Fusing them both turned the mark character itself
+            // into part of the name — `SF` and `'` became the symbol `SF'`,
+            // and the sound-pointer tables came out all zero because
+            // `.IF DF,LABEL''X''Y` could never be true.
+            if matches!(line.get(k).map(|t| &t.tok), Some(Tok::Quote)) {
+                i = k;
+                continue;
+            }
             if let Some(next) = line.get(k) {
                 let text = render(next, bind);
                 match out.last_mut() {

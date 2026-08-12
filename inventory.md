@@ -1056,6 +1056,45 @@ structured-control-flow route at all.
    cluster is still there. That assertion is deliberately left failing rather
    than softened to the current figure.
 
+3z. **Space Duel is byte-identical.** `PROGRAM: 36864 of 36864 bytes match
+   (100.00%), 0 differ`, `SHIP: 2048 of 2048`. Crystal Castles stays exact on
+   both images. Four measured causes closed the last 4,116 bytes:
+
+   | Cause | Differing after |
+   |---|---|
+   | (from 3y) `.ENABL AMA` confines the `.GLOBB` hint to the unit's own declarations | 2,487 |
+   | `/` is signed and truncates toward zero | 64 |
+   | a blank is a character to `.IRPC`, and it ends a joined symbol name | 31 |
+   | the second colon of a global label may be separated from the first | 30 |
+   | a doubled concatenation mark may straddle two expansions | **0** |
+
+   **Signed division** was the large one. `AS2ROM`'s `VCTRSC` rounds a signed
+   displacement with `..2=DY-<..SCAL/2>/..SCAL`; left to right at `..SCAL=2`
+   and `DY=-32` that is `(-32-1)/2`. Unsigned division makes it `-17`, which is
+   odd, so the macro's short-vector test `..5&0FFE1` fails and it emits the
+   two-word long form where the original emits one word. That added 86 bytes
+   across the vector tables, moved `CNTSCL` from `3EC2` to `3F18`, and
+   corrupted every `JSRL` referring to it as far back as `3000`. One operator,
+   2,423 bytes.
+
+   The high-byte idiom `FROM&0FF00/0100` is unaffected in practice: the value
+   becomes `0FFBE` rather than `0BE`, but every use in either corpus
+   (`M6502.MAC:57,166,200`, `CCT.MAC:731`, `AS2TST.MAC:833`) feeds an 8-bit
+   operand and takes the low byte. A test asserting the intermediate was
+   rewritten to say so, keeping its left-to-right control.
+
+   **The straddling concatenation mark** was the last one, and the subtlest.
+   `AS2POK`'s `OFFSET` macro writes `LABEL''X''Y` with `.IRPC X` inside
+   `.IRPC Y`. Expanding the macro binds only `LABEL`, so the first mark is the
+   macro's and the second belongs to the `X` loop — item 3o's rule, applied to
+   a doubled mark. Consuming both fused the mark character into the name, so
+   `SF` and `'` became the symbol `SF'` and no `.IF DF,LABEL''X''Y` could ever
+   be true. All fourteen sound-pointer tables came out zero.
+
+   **Six assembly errors remain**, all `expression ended unexpectedly`, none of
+   them undefined symbols. The image is exact, so none of them changes an
+   emitted byte. `ASTRD2.MAC:5012` is gone.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
