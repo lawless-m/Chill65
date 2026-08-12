@@ -308,7 +308,22 @@ fn substitute(line: &[Token], bind: &[(String, Vec<Token>)]) -> Vec<Token> {
                     // Fuse with what is already there, unless that is the
                     // character-value operator waiting for its character.
                     Some(last) if !matches!(last.tok, Tok::Quote) => {
-                        let fused = format!("{}{}", tok_text(last), text);
+                        // A blank cannot extend a symbol name — it ends one. So
+                        // the join takes the text only as far as the first one.
+                        //
+                        // `VGMC.MAC`'s `ALPHA` runs `.IRPC ...X,<STRING>` over
+                        // `JSRL CHAR.'...X`, and `AS2ROM.MAC:1097` passes
+                        // `<MCMLXXX ATARI IN>`. On the two blank iterations the
+                        // join is `CHAR.` and a space, which named a symbol
+                        // `"CHAR. "` that nothing defines; the blank glyph is
+                        // `CHAR.:` at `VGAN.MAC:129`.
+                        let joined = format!("{}{}", tok_text(last), text);
+                        let fused = joined
+                            .trim_start()
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
                         let (span, sp) = (last.span.clone(), last.space_before);
                         *last = synthetic(Tok::Symbol(fused), &span, sp);
                     }

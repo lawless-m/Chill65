@@ -1601,10 +1601,30 @@ impl<'a> Assembler<'a> {
                         // text. `Tok::Number` keeps its digits verbatim, so
                         // `<0123>` yields "0", "1", "2", "3" rather than the
                         // single value those digits would evaluate to.
+                        //
+                        // A blank between two tokens is a character of that
+                        // text like any other, and joining the tokens without
+                        // it loses an iteration. `AS2ROM.MAC:1097` writes
+                        // `ALPHA <MCMLXXX ATARI IN>`, whose two spaces map
+                        // through `VGMC.MAC`'s `JSRL CHAR.'...X` onto the blank
+                        // glyph `CHAR.:` at `VGAN.MAC:129`. Dropping them emits
+                        // sixteen words where the original emits eighteen.
+                        //
+                        // `space_before` is a flag, not a count, so a run of
+                        // several blanks would still yield one. No such run
+                        // exists in either corpus; widening it would be guessing
+                        // at a case with no evidence behind it.
                         match inner.first() {
                             Some(first) => {
-                                let text: String =
-                                    inner.iter().map(crate::macros::token_text).collect();
+                                let text: String = inner
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, t)| {
+                                        let sep =
+                                            if i > 0 && t.space_before { " " } else { "" };
+                                        format!("{sep}{}", crate::macros::token_text(t))
+                                    })
+                                    .collect();
                                 text.chars()
                                     .map(|c| {
                                         vec![Token {
@@ -2111,6 +2131,39 @@ mod tests {
         .expect("assembly failed");
         let bytes: Vec<u8> = (0xA000u16..0xA004).filter_map(|a| img.get(&a).copied()).collect();
         assert_eq!(bytes, vec![1, 1, 1], "SYM0, SYM1 and SYM2 must all exist");
+    }
+
+    #[test]
+    fn irpc_iterates_a_blank_and_the_join_stops_at_it() {
+        // Two rules meet on one line, and the corpus needs both. `VGMC.MAC`'s
+        // `ALPHA` is `.IRPC ...X,<STRING>` around `JSRL CHAR.'...X`, and
+        // `AS2ROM.MAC:1097` passes `<MCMLXXX ATARI IN>`:
+        //
+        //  - the blank is a character of the string, so it gets its own
+        //    iteration — drop it and the list comes out two words short;
+        //  - a blank cannot extend a symbol name, so `CHAR.` joined to a blank
+        //    names `CHAR.`, the blank glyph at `VGAN.MAC:129`.
+        //
+        // `A B` is three characters, so three bytes, and the middle one must
+        // come from the base symbol rather than from anything named "SYM ".
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             SYM=7\n\
+             SYMA=1\n\
+             SYMB=2\n\
+             	.IRPC X,<A B>\n\
+             	.BYTE SYM'X\n\
+             	.ENDR\n\
+             	.END\n",
+        )])
+        .expect("assembly failed");
+        let bytes: Vec<u8> = (0xA000u16..0xA003).filter_map(|a| img.get(&a).copied()).collect();
+        assert_eq!(
+            bytes,
+            vec![1, 7, 2],
+            "the blank iterates, and joining onto it yields the base symbol"
+        );
     }
 
     /// The characters come from the argument's raw text, not its value.
