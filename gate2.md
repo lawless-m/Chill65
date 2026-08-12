@@ -156,6 +156,41 @@ comparison against the `.LDA` oracle.
   keeps feeding the watchdog. A frame hash that stops changing is the only
   signal, which is why `attract_sd` watches the picture evolve.
 
+### Some shapes do not close, and that is not our bug
+
+Draw the attract screen and a few corners visibly miss — most obviously on the
+title cubes, where an edge stops short of its vertex. It is tempting to hunt
+for a rounding error in the generator. Don't: the gaps are in Atari's own
+coordinate tables.
+
+`AS2CU2.DAT`'s `CUBE01` begins with a blank move to `(2,18)` and its hexagon
+comes back round to `(0,18)` — two units adrift. Its three sibling rotation
+frames, `CUBE11`, `CUBE21` and `CUBE31`, close exactly. That is verifiable by
+reading the source text alone, with no assembler, generator or renderer in the
+path, and our decode reproduces every delta of it. Since the assembled image is
+byte-identical (§gate1), the display lists we execute *are* the shipped ones.
+The cube spins, so the gap blinked in and out on the original machine too.
+
+It is not confined to the attract screen — `SHIELD`, `COMET`, `DWARF`, the
+rocks, pyramids and saucer all have dangling vertices. But at 1-3% of their own
+segment lengths those sit far below the beam spot. `CUBE01` is an order of
+magnitude worse in proportion, at 11%, and the title cubes are drawn large,
+which is why it is the one you see.
+
+Two traps in measuring this, both fallen into first time round:
+
+- An **open end is not a defect**. Any shape drawn as a stroke rather than a
+  closed loop has two loose ends by design; `SHOT` is four vectors making a
+  tick mark. Only a gap that is *small relative to the shape's own segments*
+  is a corner that missed.
+- A **text scan of the `.DAT` files is not enough**, because shapes call
+  sub-shapes with `JSRL` and a parser that ignores them computes the wrong
+  geometry. Run the shapes through the generator instead.
+
+Faithful reproduction means keeping these. If they are ever to be corrected it
+should be a deliberate, separately flagged option, never a silent fix in the
+decoder.
+
 ## Next
 
 Phase 3 — the MAME differential harness. The plan is emphatic that it be built
