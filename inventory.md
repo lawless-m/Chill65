@@ -1042,6 +1042,20 @@ structured-control-flow route at all.
    `ROCKDAT` (36), `AS2POK` (30), `EXPIC` (18), `AS2TST` (8), `A2NAME` (3) and
    `AS2MSG` (1).
 
+   **Gated.** A resync walk over `-6..+6` finds the best offset at `+0` with a
+   full match for every region that carried the shift — `A2EARO` 1513/1513,
+   `XYSIG` 271/271, `VGUTR2` 257/257, `A2GOOF`'s blank 16/16, `AS2IRQ` 272/272
+   — so there is no residual offset anywhere, and all three former sites at
+   `8941`, `8966` and `896D` agree byte for byte. `cargo test --workspace` is
+   39 binaries, 361 passing, 0 failing; `cargo test -p chill65-asm` is 128
+   passing, 0 failing. The seven assembly errors are the same seven as before,
+   none of them undefined symbols.
+
+   `gate_sd`'s `program_image_is_byte_identical` still fails, as it has since
+   it was written: it asserts the whole `0000-8FFF` image and the `3500-3FFF`
+   cluster is still there. That assertion is deliberately left failing rather
+   than softened to the current figure.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
