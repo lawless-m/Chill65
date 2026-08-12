@@ -921,6 +921,43 @@ structured-control-flow route at all.
    The one property that separates them is `.ENABL AMA`: `A2EARO` has it,
    `AS2COI` does not.
 
+3w. **The 3-byte shift is three `GAME` references, all in `A2EARO`.** There is
+   no separate site at `8952` — that address falls inside a merged compare run,
+   not at a structural boundary. The first divergence is at oracle `8941`, and
+   the shift accrues one byte at a time across three plain (unprefixed)
+   references in `BOOK`:
+
+   | Source | Oracle | Ours | |
+   |---|---|---|---|
+   | `A2EARO.MAC:386` `LDA GAME` | `8941` `AD 34 00` | `8941` `A5 34` | +1 |
+   | `A2EARO.MAC:405` `LDA GAME` | `8966` `AD 34 00` | `8965` `A5 34` | +2 |
+   | `A2EARO.MAC:408` `ADC GAME` | `896D` `6D 34 00` | `8969` `65 34` | +3 |
+
+   The surrounding code confirms the attribution exactly: `F8 A0 00` (`SED` /
+   `LDY #0`, lines 384-385) precedes the first, and `0A 0A AA 18` then four
+   `JSR ADGMTM` follow it (lines 387-394). Our `896D` re-synchronises with the
+   oracle's `8970` and stays in step, so the whole shift is these three bytes
+   and nothing else. `A2EARO`, `XYSIG`, `VGUTR2` and `A2GOOF`'s blank section
+   then inherit it.
+
+   `GAME` is defined at `ASTRD2.MAC:317` (`GAME: .BLKB 1`, linking to `0034`).
+   Its declarations across the build:
+
+   | Unit | Declaration | `.ENABL AMA` |
+   |---|---|---|
+   | `A2EARO` (the using unit) | `.GLOBL ... GAME` at :28 | yes, line 4 |
+   | `A2NAME` | `.GLOBB ... GAME ...` at :21 | yes, line 3 |
+   | `AST2RD`, `ASTRD2` | `.GLOBL ... GAME` at :124 | `ASTRD2` yes, line 3 |
+
+   Set against 3v this sharpens the contradiction into something testable.
+   Both symbols are byte-sized build-wide by a `.GLOBB` in another unit, and
+   both are referenced plainly. The using units differ only in `AMA`:
+   `A2EARO` has it and the original went absolute; `AS2COI` does not and the
+   original went zero page. Our `encode::resolve_mode` currently reads `AMA`
+   the other way round — `zp_ok = byte_sized || (ama && v < 0x100)`, so `AMA`
+   *permits* the short form. Whether inverting that fits every row is the next
+   measurement, not a conclusion.
+
 4. **The toolchain source changes the O1 calculus** — see §4. Task #5 should read
    `atari_tools/OPC65.MAC` and the LINKM sources before deciding.
 
