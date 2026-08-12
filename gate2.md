@@ -3,6 +3,9 @@
 The runtime runs Crystal Castles from source assembled by our own toolchain, and
 the game's own diagnostic agrees the bytes are right.
 
+**Space Duel now clears the same bar** — see §"Space Duel" below. Everything
+above and before that section is the original Crystal Castles gate, unchanged.
+
 ## The five commands, one run, all exit 0
 
 | # | Command | Result |
@@ -93,7 +96,71 @@ Windowing and audio output, and any third-party crate for them. The core stays
 dependency-free and headless. "Playable" is a subsequent human-judged milestone;
 `ccrun --dump` provides the artefact for judging it.
 
+## Space Duel — the same bar, a different machine
+
+Space Duel boots, draws, passes its own self-test and runs attract mode
+deterministically, on hardware that shares almost nothing with Crystal
+Castles' but the CPU and the sound chip.
+
+| Check | Result |
+|---|---|
+| `vg_lists` | 19 real display lists execute and terminate cleanly |
+| `boot_sd` | boots, 797 interrupts, 102 `GOADD` strobes over 102 steady frames |
+| `selftest_sd` | **7 ROM checksums and 4 error flags, all zero** |
+| `attract_sd` | 1,200 frames, 825 distinct pictures, two runs identical |
+
+```text
+CHILL65_CORPUS=/path/to/space-duel \
+  cargo test -p chill65-runtime --test vg_lists    -- --ignored --nocapture
+  cargo test -p chill65-runtime --test boot_sd     -- --ignored --nocapture
+  cargo test -p chill65-runtime --test selftest_sd -- --ignored --nocapture
+  cargo test -p chill65-runtime --test attract_sd  -- --ignored --nocapture
+```
+
+### What is new, and where it came from
+
+Crystal Castles draws into a bitmap. Space Duel has none: the CPU builds a
+**display list** in vector RAM and a vector generator executes it. That model
+(`crates/chill65-runtime/src/vg.rs`) is decoded from `space-duel/VGMC.MAC` —
+Atari's own macros for "the auto-normalizing vector generator" — with
+`VGUTR2.MAC`'s run-time library corroborating every word. The board around it
+(`src/sd.rs`) comes from `AS2DEC.MAC`, and **MAME's `spacduel` ROM layout
+independently corroborates the ROM half of that map**.
+
+The two modules carry 74 source citations and 15 explicit `UNVERIFIED`
+markers. `machine.rs`, `video.rs`, `frame.rs` and `input.rs` are untouched:
+the `Bus` trait was already the seam that lets two boards differ, and bending
+one struct to cover both would have made each harder to check against its own
+evidence.
+
+### The self-test is the strongest result
+
+`AS2TST.MAC` holds `POWERON`, which *is* the reset vector, so its zero-page,
+VG RAM, ROM, POKEY and EAROM checks run on every boot. Its ROM checksums are
+EOR sums seeded by the `CKUM` bytes Atari planted through the source, so a
+correct image sums to zero and `AS2TST.MAC:404-406` sounds an alarm otherwise.
+
+All seven come out zero. The game checks the Phase 1 build with the original's
+own arithmetic and is satisfied — a second, independent witness to the
+byte-identical image, arriving from inside the game rather than from a
+comparison against the `.LDA` oracle.
+
+### Two things worth knowing
+
+- **The boot is not instant.** The first interrupt lands on frame 0, but the
+  first `GOADD` is frame 98: the quiet stretch *is* the power-on self-test. A
+  smoke test that stopped inside it would see a blank screen and a healthy
+  watchdog and be unable to tell that from a wedge.
+- **A vector machine can wedge without crashing.** If the display list stops
+  being rebuilt, the generator redraws the last one and the interrupt handler
+  keeps feeding the watchdog. A frame hash that stops changing is the only
+  signal, which is why `attract_sd` watches the picture evolve.
+
 ## Next
 
 Phase 3 — the MAME differential harness. The plan is emphatic that it be built
 **before** the emitter. That is a fresh decision, not a continuation.
+
+For Space Duel the harness has a head start it did not have for Crystal
+Castles: MAME ships a `spacduel` driver, the images are byte-identical, and
+the runtime is already proven deterministic frame for frame.
