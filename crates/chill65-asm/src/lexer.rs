@@ -484,8 +484,30 @@ impl Lexer {
 
                 // Label definition: NAME: or NAME::
                 if i < b.len() && b[i] == ':' {
-                    let global = i + 1 < b.len() && b[i + 1] == ':';
+                    let mut global = i + 1 < b.len() && b[i + 1] == ':';
                     i += if global { 2 } else { 1 };
+                    // The second colon may be separated from the first.
+                    // `ASTRD2.MAC:5011` reads `PARAMS:` tab `:LDA I,0` — the
+                    // only line of its kind in either corpus, and plainly a
+                    // mistyped `PARAMS::`. Left alone, the stray colon opened
+                    // the operator field and the `LDA I,0` was never assembled.
+                    //
+                    // The byte evidence cannot say whether the original also
+                    // made `PARAMS` global: it is referenced only from within
+                    // its own unit, so both readings emit the same image. This
+                    // one accounts for the character rather than discarding it,
+                    // and is the reading that would be right if the symbol ever
+                    // were referenced from elsewhere.
+                    if !global {
+                        let mut k = i;
+                        while k < b.len() && (b[k] == ' ' || b[k] == '\t') {
+                            k += 1;
+                        }
+                        if k < b.len() && b[k] == ':' {
+                            global = true;
+                            i = k + 1;
+                        }
+                    }
                     out.push(Token {
                         tok: Tok::LabelDef { name, global },
                         span: span(start),
@@ -699,6 +721,33 @@ mod tests {
             },
             Tok::Eol
         ]);
+    }
+
+    #[test]
+    fn the_second_colon_of_a_global_label_may_be_separated() {
+        // ASTRD2.MAC:5011 reads `PARAMS:` tab `:LDA I,0`. Treating the second
+        // colon as the start of the operator field lost the instruction.
+        let toks = lex("PARAMS:	:LDA I,0");
+        assert_eq!(
+            toks[0],
+            Tok::LabelDef {
+                name: "PARAMS".into(),
+                global: true
+            }
+        );
+        // The control: the rest of the line must still be there, and must not
+        // begin with a stray colon.
+        assert_eq!(toks[1], Tok::Symbol("LDA".into()));
+        // And a lone colon after a label is only the label's, not any colon
+        // later on the line.
+        let plain = lex("PARAMS:	LDA I,0");
+        assert_eq!(
+            plain[0],
+            Tok::LabelDef {
+                name: "PARAMS".into(),
+                global: false
+            }
+        );
     }
 
     #[test]
