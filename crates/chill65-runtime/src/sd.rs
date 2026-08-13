@@ -101,7 +101,7 @@
 
 use crate::bus::Bus;
 use crate::pokey::Pokey;
-use crate::vg::{Segment, Stop, Vg, VEC_BYTES};
+use crate::vg::{BeamMove, Segment, Stop, Vg, VEC_BYTES};
 
 /// CPU clock, in Hz.
 ///
@@ -228,6 +228,15 @@ pub struct SdMachine {
     pub vg: Vg,
     /// The segments the last `GOADD` strobe drew.
     pub segments: Vec<Segment>,
+    /// Record the whole beam path, not just the lit parts, into [`Self::beam`].
+    ///
+    /// Off by default and free when off. A display model needs the blanked
+    /// travel and the time it takes; the picture does not, and the differential
+    /// harness compares pictures.
+    pub trace_beam: bool,
+    /// Every movement the last `GOADD` strobe made, when [`Self::trace_beam`]
+    /// is set. Empty otherwise.
+    pub beam: Vec<BeamMove>,
     pub vg_go_strobes: u64,
     /// Set if a display list ever failed to end cleanly. Reported, never a
     /// panic: a list is data, and malformed data must not stop the machine.
@@ -279,6 +288,8 @@ impl SdMachine {
             prog: [0; PROG_LEN],
             vg: Vg::new(),
             segments: Vec::new(),
+            trace_beam: false,
+            beam: Vec::new(),
             vg_go_strobes: 0,
             vg_fault: None,
             pokey0: Pokey::new(),
@@ -344,7 +355,13 @@ impl SdMachine {
         let mem = self.vector_window();
         self.vg.reset(0);
         self.segments.clear();
-        let stop = self.vg.run(&mem, VG_BUDGET, &mut self.segments);
+        let stop = if self.trace_beam {
+            self.beam.clear();
+            self.vg
+                .run_trace(&mem, VG_BUDGET, &mut self.segments, &mut self.beam)
+        } else {
+            self.vg.run(&mem, VG_BUDGET, &mut self.segments)
+        };
         if !stop.is_clean() && self.vg_fault.is_none() {
             self.vg_fault = Some(stop);
         }
@@ -745,6 +762,66 @@ mod tests {
         put_words(&mut m, 0x001, &[CNTR, vctr(8, 4, 7), vctr(-6, 0, 7), HALT]);
         m.write(0x0C80, 0);
         assert_ne!(m.frame_hash(), first, "a different list hashes differently");
+    }
+
+    /// The list both beam-trace tests run: a blanked move, a centre, and two
+    /// lit vectors, so all three kinds of movement are present.
+    fn plant_mixed_list(m: &mut SdMachine) {
+        put_words(m, 0x000, &[0xE001]);
+        put_words(
+            m,
+            0x001,
+            &[
+                vctr(8, 4, 7),
+                vctr(6, 0, 0),
+                CNTR,
+                vctr(-4, 2, 7),
+                HALT,
+            ],
+        );
+    }
+
+    #[test]
+    fn tracing_the_beam_shows_the_blanked_travel_and_changes_no_picture() {
+        let mut traced = machine();
+        traced.trace_beam = true;
+        plant_mixed_list(&mut traced);
+        traced.write(0x0C80, 0);
+
+        let mut plain = machine();
+        plant_mixed_list(&mut plain);
+        plain.write(0x0C80, 0);
+
+        // What the beam did: three vectors and a centre.
+        assert_eq!(traced.beam.len(), 4);
+        assert_eq!(traced.beam[1].intensity, 0, "the blanked move is recorded");
+        assert!(!traced.beam[1].jump);
+        assert!(traced.beam[2].jump, "CNTR is a jump");
+        assert_eq!((traced.beam[2].x1, traced.beam[2].y1), (0, 0));
+        assert!(plain.beam.is_empty(), "off by default, and free when off");
+
+        // What the picture is: identical either way, hash included.
+        assert_eq!(traced.segments, plain.segments);
+        assert_eq!(traced.frame_hash(), plain.frame_hash());
+        assert_eq!(traced.segments.len(), 2);
+    }
+
+    #[test]
+    fn each_go_strobe_refills_the_beam() {
+        let mut m = machine();
+        m.trace_beam = true;
+        plant_mixed_list(&mut m);
+
+        m.write(0x0C80, 0);
+        let first = m.beam.clone();
+        assert_eq!(first.len(), 4);
+
+        m.write(0x0C80, 0);
+        assert_eq!(m.beam, first, "the same list traces the same way");
+
+        put_words(&mut m, 0x001, &[vctr(2, 2, 7), HALT]);
+        m.write(0x0C80, 0);
+        assert_eq!(m.beam.len(), 1, "cleared, not appended to");
     }
 
     #[test]

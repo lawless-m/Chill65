@@ -161,6 +161,51 @@ pub struct Segment {
     pub color: u8,
 }
 
+/// One movement of the beam, lit or not.
+///
+/// [`Segment`] is what the picture is made of; this is what the *beam* did. A
+/// blanked move deposits no light but still takes the beam somewhere, and still
+/// takes time doing it, so anything modelling the display rather than the
+/// picture needs both. `intensity == 0` is blanked travel, and `color` is then
+/// simply whatever was latched.
+///
+/// Lit moves correspond one-to-one with the [`Segment`]s the same execution
+/// produces, field for field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BeamMove {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+    /// Brightness on the 0-7 scale. 0 means blanked travel.
+    pub intensity: u8,
+    /// Latched colour index, 0-15. Meaningless when blanked.
+    pub color: u8,
+    /// A `CNTR` recentre: the position jumps rather than sweeping.
+    pub jump: bool,
+}
+
+impl BeamMove {
+    /// How long this move occupies the beam, in generator ticks.
+    ///
+    /// **UNVERIFIED**, and the module's most speculative number. `VGMC.MAC` and
+    /// `VGUTR2.MAC` describe what to draw and never what it costs; `sd.rs:99`
+    /// records the same gap from the machine's side. The model is the Chebyshev
+    /// length — `max(|dx|, |dy|)` — on the reasoning that both axes are driven
+    /// from one shared clock count, so the larger component sets the duration
+    /// and the smaller merely runs at a lower rate. `CNTR` dumps the position
+    /// rather than sweeping to it, so a jump costs nothing.
+    ///
+    /// A uniform rate cancels out of a phosphor model's overall brightness; it
+    /// is the *relative* cost of one move against another that this decides.
+    pub fn ticks(&self) -> u32 {
+        if self.jump {
+            return 0;
+        }
+        (self.x1 - self.x0).unsigned_abs().max((self.y1 - self.y0).unsigned_abs())
+    }
+}
+
 /// Why [`Vg::run`] stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stop {
@@ -184,11 +229,88 @@ impl Stop {
 /// Five levels of subroutine nesting — `VGMC.MAC:82-83`.
 pub const STACK_DEPTH: usize = 5;
 
+/// Half the visible width, in the generator's own units after scaling.
+///
+/// The board's **own diagnostic** settles this. `XYSIG.MAC` — "COLOR XY
+/// SIGNITURE ANALASIS", written for the Space Duel XY colour graphics board —
+/// tests the long-vector instruction by driving the beam from the centre to a
+/// corner, at `XYSIG.MAC:143-145`:
+///
+/// ```text
+/// TEST2:  CNTR
+///         SCAL 1
+///         VCTR 512., 384., 1
+/// ```
+///
+/// `SCAL 1` is binary scale 1, which halves (`VGMC.MAC:77`), so the deltas
+/// drawn are 256 and 192 — and a diagnostic drawing a corner is drawing the
+/// edge of the deflection it has. The trailing dots are MACRO-11 decimal
+/// overrides; the file is in `.RADIX 16` around them.
+///
+/// The game's own use agrees independently. `AST2RD.MAC:575-576` gives
+/// `XRIGHT =20` and `YTOP =18` — hex, so 32 by 24 — as the edges of its
+/// playfield, and `AST2RD.MAC:1920` wraps a coordinate with `AND I,XRIGHT-1`,
+/// which only makes sense if that span is the whole screen. 512/32 and 384/24
+/// are both exactly 16 generator units per playfield unit, and 512:384 is 4:3.
+///
+/// **UNVERIFIED:** what the hardware does *past* this. Overscan, the DAC's own
+/// clip limits and where the tube's edge actually falls are analogue questions
+/// the source cannot answer. This is the deflection the software drives, which
+/// is what a trace needs; it is not proof that nothing exists beyond it.
+pub const FULL_SCALE_X: i32 = 256;
+
+/// Half the visible height, in generator units. See [`FULL_SCALE_X`].
+pub const FULL_SCALE_Y: i32 = 192;
+
 /// The vector memory window is CPU `2000-3FFF`: 8K bytes, 4K words.
 pub const VEC_BYTES: usize = 0x2000;
 
 /// CPU address the window starts at — `AS2DEC.MAC:64`, `VECRAM=2000`.
 pub const VEC_BASE: u16 = 0x2000;
+
+/// The exponent in [`intensity_drive`]. See there.
+pub const INTENSITY_GAMMA: f32 = 2.2;
+
+/// A 0-7 intensity code as radiant drive in linear light, 1.0 at full.
+///
+/// This is what a beam trace wants: not the code, and not a voltage, but light
+/// per unit time, so that energy is drive multiplied by dwell.
+///
+/// # What the corpus settles
+///
+/// The code is three bits, and that is corroborated twice.
+/// `VGUTR2.MAC:67-72`: "`VGBRIT` ... ITS VALUES ARE 0,10,20,30,40,...F0 WHERE 0
+/// IS OFF AND F0 IS MAX BRIGHTNESS. IN THE VECTOR INSTRUCTIONS ONLY THE UPPER 3
+/// BITS IS USED." And `AST2RD.MAC:272` labels the variable "VECTOR BRIGHTNESS
+/// (0=OFF, F0=MAX, 20 INC)" — increments of `20` hex, which is exactly eight
+/// steps and so exactly the three-bit field. The game uses `.BRITE =5` as its
+/// default (`AST2RD.MAC:642`) and `ORA #0E0 ;FULL BRIGHT ON FLASH`
+/// (`AST2RD.MAC:731`), `0E0` being code 7.
+///
+/// # What the corpus does not settle, and the reasoning that fills it
+///
+/// Nothing in the source says what a code does to a beam. The chain it goes
+/// through is a small weighted-resistor DAC into a Z amplifier into a gun, and
+/// two things are true of that chain in general: the DAC is linear in
+/// **voltage** by construction, and a CRT gun is not linear in **light** — its
+/// output follows a power law of drive. So this models
+/// `(code/7)^INTENSITY_GAMMA`, with the exponent at 2.2, the usual figure for
+/// a CRT.
+///
+/// **UNVERIFIED, and reasoned rather than measured.** It is the right *shape*
+/// on general principles; the exponent is a starting value and the real
+/// Space Duel Z chain — an Atari colour XY board driving a Wells-Gardner 6100
+/// — has not been measured. Jed Margolin's "The Secret Life of Vector
+/// Generators" covers the X and Y integrators and not the Z path, so it does
+/// not help here. Correcting this needs a board and a photometer, not a
+/// listing.
+pub fn intensity_drive(code: u8) -> f32 {
+    let code = code & 0x07;
+    if code == 0 {
+        return 0.0;
+    }
+    (code as f32 / 7.0).powf(INTENSITY_GAMMA)
+}
 
 /// Sign-extend an `n`-bit two's-complement field.
 fn sign_extend(value: u16, bits: u32) -> i32 {
@@ -277,17 +399,37 @@ impl Vg {
     }
 
     /// Move the beam by a scaled delta, emitting a segment when lit.
-    fn vector(&mut self, dx: i32, dy: i32, zz: u8, out: &mut Vec<Segment>) {
+    ///
+    /// `trace`, when present, receives the move whether it is lit or not.
+    fn vector(
+        &mut self,
+        dx: i32,
+        dy: i32,
+        zz: u8,
+        out: &mut Vec<Segment>,
+        trace: Option<&mut Vec<BeamMove>>,
+    ) {
         let (x0, y0) = (self.x, self.y);
         self.x += self.scale(dx);
         self.y += self.scale(dy);
         // ZZ = 0 is a blanked move. ZZ = 1 defers to the latch.
         // VGUTR2.MAC:70-72.
         let intensity = match zz {
-            0 => return,
+            0 => 0,
             1 => self.intensity,
             other => other,
         };
+        if let Some(trace) = trace {
+            trace.push(BeamMove {
+                x0,
+                y0,
+                x1: self.x,
+                y1: self.y,
+                intensity,
+                color: self.color,
+                jump: false,
+            });
+        }
         if intensity == 0 {
             return;
         }
@@ -305,6 +447,27 @@ impl Vg {
     ///
     /// `mem` must be [`VEC_BYTES`] long and cover CPU `2000-3FFF`.
     pub fn step(&mut self, mem: &[u8], out: &mut Vec<Segment>) -> Option<Stop> {
+        self.step_inner(mem, out, None)
+    }
+
+    /// As [`Vg::step`], and also records the beam's movement in `trace`.
+    pub fn step_trace(
+        &mut self,
+        mem: &[u8],
+        out: &mut Vec<Segment>,
+        trace: &mut Vec<BeamMove>,
+    ) -> Option<Stop> {
+        self.step_inner(mem, out, Some(trace))
+    }
+
+    /// The one implementation. `step` and `step_trace` differ only in whether
+    /// they are watching.
+    fn step_inner(
+        &mut self,
+        mem: &[u8],
+        out: &mut Vec<Segment>,
+        mut trace: Option<&mut Vec<BeamMove>>,
+    ) -> Option<Stop> {
         debug_assert_eq!(mem.len(), VEC_BYTES, "vector window is 8K");
         let w = Self::word(mem, self.pc);
         self.pc = (self.pc + 1) & 0x0FFF;
@@ -318,7 +481,7 @@ impl Vg {
                 let dy = sign_extend(w & 0x1FFF, 13);
                 let dx = sign_extend(w2 & 0x1FFF, 13);
                 let zz = ((w2 >> 13) & 0x7) as u8;
-                self.vector(dx, dy, zz, out);
+                self.vector(dx, dy, zz, out, trace.as_deref_mut());
             }
             0b001 => {
                 self.halted = true;
@@ -329,7 +492,7 @@ impl Vg {
                 let dx = sign_extend(w & 0x1F, 5) * 2;
                 let dy = sign_extend((w >> 8) & 0x1F, 5) * 2;
                 let zz = ((w >> 5) & 0x7) as u8;
-                self.vector(dx, dy, zz, out);
+                self.vector(dx, dy, zz, out, trace.as_deref_mut());
             }
             0b011 => {
                 if w & 0x1000 == 0 {
@@ -347,8 +510,20 @@ impl Vg {
             }
             // Centre. VGMC.MAC:24; low bits UNVERIFIED, ignored.
             0b100 => {
+                let (x0, y0) = (self.x, self.y);
                 self.x = 0;
                 self.y = 0;
+                if let Some(trace) = trace.as_deref_mut() {
+                    trace.push(BeamMove {
+                        x0,
+                        y0,
+                        x1: 0,
+                        y1: 0,
+                        intensity: 0,
+                        color: self.color,
+                        jump: true,
+                    });
+                }
             }
             // Call. VGMC.MAC:43.
             0b101 => {
@@ -382,6 +557,23 @@ impl Vg {
         let deadline = self.executed + limit;
         while self.executed < deadline {
             if let Some(stop) = self.step(mem, out) {
+                return stop;
+            }
+        }
+        Stop::Budget
+    }
+
+    /// As [`Vg::run`], and also records every beam movement in `trace`.
+    pub fn run_trace(
+        &mut self,
+        mem: &[u8],
+        limit: u64,
+        out: &mut Vec<Segment>,
+        trace: &mut Vec<BeamMove>,
+    ) -> Stop {
+        let deadline = self.executed + limit;
+        while self.executed < deadline {
+            if let Some(stop) = self.step_trace(mem, out, trace) {
                 return stop;
             }
         }
@@ -657,5 +849,190 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(vg.run(&m, 10, &mut out), Stop::Halt);
         assert_eq!(out.len(), 1);
+    }
+
+    /// Run a list with the beam watched, as `run` does without.
+    fn run_traced(words: &[u16]) -> (Vg, Vec<Segment>, Vec<BeamMove>, Stop) {
+        let m = mem(words);
+        let mut vg = Vg::new();
+        vg.reset(0);
+        let (mut out, mut trace) = (Vec::new(), Vec::new());
+        let stop = vg.run_trace(&m, 10_000, &mut out, &mut trace);
+        (vg, out, trace, stop)
+    }
+
+    #[test]
+    fn a_blanked_short_vector_moves_the_beam_and_draws_nothing() {
+        let (vg, out, trace, stop) = run_traced(&[vctr_short(8, 4, 0), HALT]);
+        assert_eq!(stop, Stop::Halt);
+        assert!(out.is_empty(), "ZZ = 0 draws nothing");
+        assert_eq!(trace.len(), 1, "but the beam still went somewhere");
+        assert_eq!(
+            trace[0],
+            BeamMove {
+                x0: 0,
+                y0: 0,
+                x1: 8,
+                y1: 4,
+                intensity: 0,
+                color: 0,
+                jump: false,
+            }
+        );
+        assert_eq!((vg.x, vg.y), (8, 4));
+    }
+
+    #[test]
+    fn a_blanked_long_vector_is_traced_too() {
+        let long = vctr_long(-300, 700, 0);
+        let (_, out, trace, stop) = run_traced(&[long[0], long[1], HALT]);
+        assert_eq!(stop, Stop::Halt);
+        assert!(out.is_empty());
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].intensity, 0);
+        assert_eq!((trace[0].x1, trace[0].y1), (-300, 700));
+    }
+
+    #[test]
+    fn centring_is_a_jump_and_costs_no_time() {
+        let (_, _, trace, stop) = run_traced(&[vctr_short(10, 6, 7), CNTR, HALT]);
+        assert_eq!(stop, Stop::Halt);
+        assert_eq!(trace.len(), 2);
+        let jump = trace[1];
+        assert!(jump.jump);
+        assert_eq!((jump.x0, jump.y0), (10, 6));
+        assert_eq!((jump.x1, jump.y1), (0, 0));
+        assert_eq!(jump.ticks(), 0, "CNTR dumps the position, it does not sweep");
+    }
+
+    #[test]
+    fn lit_moves_match_the_segments_exactly() {
+        let words = [
+            color(4, 6),
+            vctr_short(8, 4, 1),
+            vctr_short(6, 0, 0),
+            vctr_short(-2, -10, 3),
+            CNTR,
+            vctr_short(4, 4, 7),
+            HALT,
+        ];
+        let (_, out, trace, stop) = run_traced(&words);
+        assert_eq!(stop, Stop::Halt);
+        assert_eq!(out.len(), 3, "one blanked move of the four vectors");
+        assert_eq!(trace.len(), 5, "four vectors and the centre");
+
+        let lit: Vec<&BeamMove> = trace.iter().filter(|m| m.intensity != 0).collect();
+        assert_eq!(lit.len(), out.len());
+        for (m, s) in lit.iter().zip(&out) {
+            assert_eq!(
+                (m.x0, m.y0, m.x1, m.y1, m.intensity, m.color),
+                (s.x0, s.y0, s.x1, s.y1, s.intensity, s.color)
+            );
+            assert!(!m.jump);
+        }
+    }
+
+    #[test]
+    fn scaling_applies_to_traced_moves() {
+        // SCAL 1,0 halves, and the blanked move is scaled the same as a lit
+        // one — the beam does not know whether it is on.
+        let (_, out, trace, stop) =
+            run_traced(&[scal(1, 0), vctr_short(8, 4, 0), vctr_short(8, 4, 7), HALT]);
+        assert_eq!(stop, Stop::Halt);
+        assert_eq!(trace.len(), 2);
+        assert_eq!((trace[0].x1, trace[0].y1), (4, 2));
+        assert_eq!((trace[1].x1, trace[1].y1), (8, 4));
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].x1, out[0].y1), (8, 4));
+    }
+
+    #[test]
+    fn ticks_are_the_chebyshev_length() {
+        let move_of = |x1, y1| BeamMove {
+            x0: 0,
+            y0: 0,
+            x1,
+            y1,
+            intensity: 7,
+            color: 0,
+            jump: false,
+        };
+        assert_eq!(move_of(30, 8).ticks(), 30);
+        assert_eq!(move_of(8, -30).ticks(), 30);
+        assert_eq!(move_of(-12, 12).ticks(), 12);
+        assert_eq!(move_of(0, 0).ticks(), 0);
+    }
+
+    #[test]
+    fn intensity_drive_is_zero_off_full_at_seven_and_rises_between() {
+        assert_eq!(intensity_drive(0), 0.0, "code 0 is off");
+        assert_eq!(intensity_drive(7), 1.0, "code 7 is nominal full drive");
+        for code in 1..7u8 {
+            assert!(
+                intensity_drive(code) < intensity_drive(code + 1),
+                "code {code} must be dimmer than {}",
+                code + 1
+            );
+        }
+        // The field is three bits; anything above is not a brightness.
+        assert_eq!(intensity_drive(8), 0.0);
+        assert_eq!(intensity_drive(0x0F), 1.0);
+    }
+
+    #[test]
+    fn the_diagnostic_corner_vector_lands_on_full_scale() {
+        // XYSIG.MAC:143-145, the XY board's own diagnostic, driving the beam
+        // from the centre to a corner. If our decode of SCAL and of a long
+        // vector is right, this lands exactly on the full-scale corner — which
+        // is where FULL_SCALE_X and FULL_SCALE_Y come from.
+        let long = vctr_long(512, 384, 1);
+        let (vg, out, stop) = run(&[CNTR, scal(1, 0), long[0], long[1], HALT]);
+        assert_eq!(stop, Stop::Halt);
+        assert_eq!((vg.x, vg.y), (FULL_SCALE_X, FULL_SCALE_Y));
+        // Its ZZ is 1, which defers to the latch, and the latch is 0 from
+        // reset — the diagnostic sets no status word first. So this sequence
+        // moves the beam without lighting it, which is a fact about the
+        // diagnostic and not about the scale.
+        assert!(out.is_empty());
+
+        // And back again: TEST2 returns to the centre the same way.
+        let back = vctr_long(-512, -384, 1);
+        let (vg, _, stop) = run(&[
+            CNTR,
+            scal(1, 0),
+            long[0],
+            long[1],
+            CNTR,
+            back[0],
+            back[1],
+            HALT,
+        ]);
+        assert_eq!(stop, Stop::Halt);
+        assert_eq!((vg.x, vg.y), (-FULL_SCALE_X, -FULL_SCALE_Y));
+    }
+
+    #[test]
+    fn tracing_does_not_change_what_is_drawn() {
+        let words = [
+            color(2, 5),
+            vctr_short(8, 4, 1),
+            vctr_short(6, 0, 0),
+            CNTR,
+            scal(1, 0),
+            vctr_short(-2, -10, 3),
+            HALT,
+        ];
+        let m = mem(&words);
+
+        let mut plain = Vg::new();
+        plain.reset(0);
+        let mut plain_out = Vec::new();
+        let plain_stop = plain.run(&m, 10_000, &mut plain_out);
+
+        let (traced, traced_out, _, traced_stop) = run_traced(&words);
+        assert_eq!(plain_stop, traced_stop);
+        assert_eq!(plain_out, traced_out);
+        assert_eq!((plain.x, plain.y), (traced.x, traced.y));
+        assert_eq!(plain.executed, traced.executed);
     }
 }

@@ -1145,3 +1145,131 @@ The model composites **once per frame**, from the latched table. There is no
 scanline-level video model, and `harness.md` §13.6 records why building one is
 out of scope. A game that changed the table part-way down the field would be
 drawn as though it had not.
+
+## 14. Space Duel's vector generator — deflection full scale (**corroborated**)
+
+Note that §§1-13 above are Crystal Castles, which has a bitmap. This section is
+Space Duel, which has none: the CPU builds a display list and the generator
+deflects a beam. `vg.rs` documents the instruction set; this is about how far
+that beam goes.
+
+### 14.1 The number, and where it comes from
+
+**The visible field is 512 by 384 generator units — ±256 by ±192 about the
+centre** — after the generator's scale is applied.
+
+The primary evidence is the board's own diagnostic. `XYSIG.MAC` is titled
+"COLOR XY SIGNITURE ANALASIS" and its header names the hardware: "SPACE DUEL XY
+COLOR GRAPHICS BOARD". It tests the long-vector instruction by driving the beam
+from the centre to a corner (`XYSIG.MAC:143-145`):
+
+```text
+TEST2:  CNTR
+        SCAL 1
+        VCTR 512., 384., 1
+```
+
+`SCAL 1` is binary scale 1, which halves (`VGMC.MAC:77`), so the deltas actually
+drawn are 256 and 192. The trailing dots are MACRO-11 decimal overrides — the
+file is in `.RADIX 16` around them. A diagnostic drawing a corner is drawing the
+edge of the deflection it has; the same vector is drawn back again, negated, at
+`XYSIG.MAC:147`, so the pair sweeps a full diagonal.
+
+Our decoder agrees, which is the point of testing it:
+`vg.rs`'s `the_diagnostic_corner_vector_lands_on_full_scale` runs exactly those
+words and lands on (256, 192).
+
+### 14.2 The game's own use agrees, independently
+
+`AST2RD.MAC:575-576` sets the playfield's edges:
+
+```text
+XRIGHT  =20     ;RIGHT SIDE OF SCREEN
+YTOP    =18     ;TOP OF SCREEN
+```
+
+Hex, so 32 by 24. That these are the *whole* screen and not a corner of it is
+settled by `AST2RD.MAC:1920`, which wraps a coordinate with `AND I,XRIGHT-1` —
+a modulo that only makes sense across a full width — and by the hysteresis
+comparisons against `XRIGHT/2` and `YTOP/2` at `AST2RD.MAC:2043-2061`, which
+treat those halves as the distance to the edge.
+
+512/32 and 384/24 are both exactly **16 generator units per playfield unit**,
+and 512:384 is 4:3. Two independent sources, one written by the hardware people
+and one by the game programmers, agreeing on both the scale and the aspect.
+
+### 14.3 Measured against attract mode
+
+Twenty frames of attract, exported through `tests/trace_sd.rs`:
+
+```text
+drawn extent    x -226..242, y -182..182   (full scale 256 by 192)
+```
+
+94% of the width and 95% of the height, exceeding neither. A title screen that
+nearly fills the tube and stays inside it is what these constants predict.
+
+### 14.4 What is still UNVERIFIED
+
+- **What lies beyond.** Overscan, the DAC's own clip limits, and where the
+  tube's edge actually falls are analogue questions the source cannot answer.
+  512 by 384 is the deflection the *software drives*, which is what a beam
+  trace needs. It is not proof that nothing exists outside it.
+- **Bit 3 of the colour field.** The colour table (`AST2RD.MAC:244-251`) is
+  three bits — bit 0 blue, bit 1 green, bit 2 red — and no attract-mode word
+  has been seen to set the fourth.
+- **Beam speed.** Nothing in the corpus times a vector. `BeamMove::ticks`
+  models the cost of a move as its Chebyshev length and says so.
+- **Intensity as light.** The 0-7 code's mapping to beam current, and thence to
+  brightness, is not in the source.
+
+### 14.5 Orientation, checked by looking
+
+The beam trace format is y-up with the origin at the centre. Rendering the
+exported attract trace puts "1 COIN 1 PLAYER" above the title, the title above
+the play area, and the copyright line at the bottom, with no text mirrored —
+so our y sign is right. The picture is 4:3 and the renderer's current tube
+profile is a portrait Vectrex, so it is displayed in the wrong aspect until a
+Wells-Gardner 6100 profile exists. That is the renderer's parameter file, not
+the trace: aspect ratio is deliberately not encoded in a trace at all.
+
+### 14.6 Intensity as light (**reasoned, not measured**)
+
+`vg::intensity_drive` turns the three-bit code into radiant drive for a beam
+trace, which wants **light per unit time** — so that energy is drive multiplied
+by dwell — rather than a code or a voltage.
+
+**The code is three bits, corroborated twice.** `VGUTR2.MAC:67-72`: "`VGBRIT`
+... ITS VALUES ARE 0,10,20,30,40,...F0 WHERE 0 IS OFF AND F0 IS MAX BRIGHTNESS.
+IN THE VECTOR INSTRUCTIONS ONLY THE UPPER 3 BITS IS USED." Independently,
+`AST2RD.MAC:272` labels the variable "VECTOR BRIGHTNESS (0=OFF, F0=MAX, 20
+INC)" — increments of `20` hex, which is eight steps, which is the three-bit
+field exactly. The game's own use fits: `.BRITE =5` is its default
+(`AST2RD.MAC:642`) and `ORA #0E0 ;FULL BRIGHT ON FLASH` (`AST2RD.MAC:731`) is
+code 7. Twenty frames of attract use codes 5, 6 and 7 and nothing else.
+
+**What a code does to a beam is not in the corpus, and the model is reasoning
+rather than measurement.** The chain is a small weighted-resistor DAC into a Z
+amplifier into a gun. Two things hold of that chain in general: the DAC is
+linear in *voltage* by construction, and a CRT gun is not linear in *light* —
+its output follows a power law of drive. So the model is
+`(code/7) ^ INTENSITY_GAMMA` with the exponent at 2.2, the usual CRT figure.
+It gives 0.48, 0.71 and 1.00 for the three codes the game actually uses.
+
+Sources consulted and what they gave: Jed Margolin's ["The Secret Life of
+Vector Generators"](https://www.jmargolin.com/vgens/vgens.htm) documents the X
+and Y integrators and does not cover the Z path at all, so it does not settle
+this. The [Wells-Gardner 6100 FAQ](https://www.vectorlist.org/Documents/6100_faq.pdf)
+describes the monitor's Z amplifiers but was not reachable to quote.
+
+**UNVERIFIED.** The shape is right on general principles; the exponent is a
+starting value. Correcting it needs a board and a photometer, not a listing.
+
+Checked by rendering, since ordering is the property that matters: three
+identical strokes at the same screen position, one per code, through the tube
+model, measure 10, 11 and 12 of 255 for codes 5, 6 and 7 — monotonic, all
+visible, none saturating. Two earlier attempts at this measurement were wrong
+and are worth recording so they are not repeated: strokes placed at *different*
+heights are confounded by the vignette, which varies with position, and a high
+exposure pushes all three into the flat top of the tonemap where they read
+identically.

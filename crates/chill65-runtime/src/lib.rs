@@ -29,10 +29,12 @@
 //!   no bitmap at all and executes a display list instead.
 //! - [`sd`] — the Space Duel bus, a second machine beside the Crystal Castles
 //!   one: RAM, the vector windows, the switch ports and the watchdog.
+//! - [`btr0`] — beam traces: what the beam did, written for a tube renderer.
 //!
 //! POKEY and input arrive in subsequent tasks; see `LOOP.md`.
 
 pub mod addr;
+pub mod btr0;
 pub mod bus;
 pub mod cpu;
 pub mod exec;
