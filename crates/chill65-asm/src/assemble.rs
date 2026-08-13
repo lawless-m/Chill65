@@ -151,6 +151,8 @@ pub struct Assembler<'a> {
     gensym: u32,
     /// The macro expansion chain, for the recursion guard's error message.
     expanding: Vec<String>,
+    /// How many arguments each open expansion was called with, for `.NARG`.
+    narg: Vec<usize>,
     /// Set by `.MEXIT`; abandons the rest of the current expansion.
     mexit: bool,
     /// Addressing mode chosen at each instruction site during pass one, replayed
@@ -306,6 +308,7 @@ impl<'a> Assembler<'a> {
             stack_sizes: HashMap::new(),
             gensym: 0,
             expanding: Vec::new(),
+            narg: Vec::new(),
             mexit: false,
             modes: Vec::new(),
             mode_idx: 0,
@@ -433,6 +436,7 @@ impl<'a> Assembler<'a> {
                 self.stacks.clear();
                 self.stack_sizes.clear();
                 self.expanding.clear();
+                self.narg.clear();
                 self.mexit = false;
                 self.local_scope = 0;
                 // Start from what the probe found this unit defines anywhere,
@@ -722,8 +726,10 @@ impl<'a> Assembler<'a> {
             }
         }
         self.expanding.push(name.to_string());
+        self.narg.push(argv.len());
         let refs: Vec<Line> = body.iter().map(|l| l.as_slice()).collect();
         self.run_lines(&refs);
+        self.narg.pop();
         self.expanding.pop();
         // .MEXIT ends this expansion only, not the enclosing one.
         self.mexit = false;
@@ -1157,16 +1163,37 @@ impl<'a> Assembler<'a> {
 
             Dir::Nchr => self.nchr(args),
 
+            Dir::Narg => self.narg_dir(args),
+
             Dir::Radix => {
-                // The operand of .RADIX is always decimal, whatever the current
-                // radix — otherwise `.RADIX 10` under hex would mean sixteen.
-                if let Some(Tok::Number { text, .. }) = args.first().map(|t| &t.tok) {
-                    if let Ok(r) = text.parse::<u32>() {
-                        if (2..=16).contains(&r) {
-                            self.radix = r;
-                        } else {
-                            self.errors.push(format!("unsupported radix {r}"));
-                        }
+                // A *literal* operand of .RADIX is always decimal, whatever the
+                // current radix — otherwise `.RADIX 10` under hex would mean
+                // sixteen. A *symbol* is not: its value was computed in the
+                // radix that was current when it was assigned, so it is taken as
+                // it stands.
+                //
+                // HLL65 depends on exactly that. `HLL65.MAC:27` saves and
+                // restores the ambient radix around every structured-control-flow
+                // macro:
+                //
+                //     ...RD=10 / .RADIX 10. / (body) / .RADIX ...RD
+                //
+                // The ambient radix in those sources is 16 (`ALCOMN.MAC:1`
+                // opens with `.RADIX 16`), so `...RD=10` assigns sixteen and the
+                // restore must read sixteen back. Ignoring the symbolic form
+                // leaves the radix at 10 for the rest of the unit, and every hex
+                // literal after the first macro fails. HLL65F carries no .RADIX
+                // at all, which is why neither earlier title reached this line.
+                let r = match args.first().map(|t| &t.tok) {
+                    Some(Tok::Number { text, .. }) => text.parse::<u32>().ok(),
+                    Some(_) => self.eval_here(args).map(u32::from),
+                    None => None,
+                };
+                if let Some(r) = r {
+                    if (2..=16).contains(&r) {
+                        self.radix = r;
+                    } else {
+                        self.errors.push(format!("unsupported radix {r}"));
                     }
                 }
             }
@@ -1225,43 +1252,58 @@ impl<'a> Assembler<'a> {
 
             Dir::Iif => {
                 // .IIF cond,arg,statement — a one-line .IF/.ENDC.
-                let fields = split_commas(args);
-                if fields.len() >= 2 {
-                    // Rebuild `cond,arg` *with* its comma: test_condition splits
-                    // on commas itself, so concatenating the fields bare would
-                    // present them as a single field and silently test nothing.
-                    let mut head: Vec<Token> = fields[0].to_vec();
-                    head.push(comma_token());
-                    head.extend_from_slice(fields[1]);
-
-                    // Take the statement as the raw tail after the second
-                    // top-level comma rather than rejoining split fields —
-                    // splitting drops trailing comments, and `.ERROR`'s message
-                    // lives in one:
-                    //     .IIF GT,...S0-127.,.ERROR ...S0 ; BRANCH OUT OF RANGE
-                    let mut depth = 0i32;
-                    let mut commas = 0;
-                    let mut tail = None;
-                    for (i, t) in args.iter().enumerate() {
-                        match t.tok {
-                            Tok::Punct('<') => depth += 1,
-                            Tok::Punct('>') => depth -= 1,
-                            Tok::Punct(',') if depth == 0 => {
-                                commas += 1;
-                                if commas == 2 {
-                                    tail = Some(i + 1);
-                                    break;
-                                }
-                            }
-                            _ => {}
+                //
+                // Take the statement as the raw tail from wherever it begins
+                // rather than rejoining split fields — splitting drops trailing
+                // comments, and `.ERROR`'s message lives in one:
+                //     .IIF GT,...S0-127.,.ERROR ...S0 ; BRANCH OUT OF RANGE
+                //
+                // The statement is separated from the tested expression by a
+                // second top-level comma — or, in HLL65, by a blank.
+                // `ALVROM.MAC:86` writes
+                //     .IIF EQ,...NUM-2 CVEC ...A*CM/CD,...B*CM/CD
+                // where the statement is a macro call carrying commas of its
+                // own, so the second top-level comma belongs to `CVEC`'s
+                // argument list and stopping there cuts the call in half.
+                // Whichever boundary arrives first wins. A blank counts only
+                // once a token of the expression has been seen, so a space
+                // after the first comma — `.IIF EQ, X,stmt` — still leaves `X`
+                // as the expression rather than starting the statement.
+                //
+                // Everything before the boundary is `cond,arg`, comma included,
+                // which is what test_condition expects: it splits on commas
+                // itself, so handing it the two fields bare would present them
+                // as one and silently test nothing.
+                let mut depth = 0i32;
+                let mut commas = 0;
+                let mut expr_toks = 0;
+                let mut split = None;
+                for (i, t) in args.iter().enumerate() {
+                    if commas == 1 {
+                        if depth == 0 && t.space_before && expr_toks > 0 {
+                            split = Some((i, i));
+                            break;
                         }
+                        expr_toks += 1;
                     }
-                    if let Some(start) = tail {
-                        if self.test_condition(&head).unwrap_or(false) {
-                            let stmt: Vec<Token> = args[start..].to_vec();
-                            let stmt_lines: Vec<Line> = vec![&stmt];
-                            self.run_line(&stmt_lines, 0);
+                    match t.tok {
+                        Tok::Punct('<') => depth += 1,
+                        Tok::Punct('>') => depth -= 1,
+                        Tok::Punct(',') if depth == 0 => {
+                            commas += 1;
+                            if commas == 2 {
+                                split = Some((i, i + 1));
+                                break;
+                            }
                         }
+                        _ => {}
+                    }
+                }
+                if let Some((head_end, start)) = split {
+                    if self.test_condition(&args[..head_end]).unwrap_or(false) {
+                        let stmt: Vec<Token> = args[start..].to_vec();
+                        let stmt_lines: Vec<Line> = vec![&stmt];
+                        self.run_line(&stmt_lines, 0);
                     }
                 }
             }
@@ -1542,6 +1584,37 @@ impl<'a> Assembler<'a> {
         self.define(&name, text.chars().count() as u16, false);
     }
 
+    /// `.NARG SYM` — how many arguments the innermost open expansion was called
+    /// with.
+    ///
+    /// It is what makes a macro's trailing argument optional. `ALVROM.MAC:68`
+    /// declares `CVEC NEWX,NEWZ,BRIT` and then asks:
+    ///
+    /// ```text
+    ///     .NARG ...NUM
+    ///     .IIF EQ,...NUM-2 ...BR=0
+    ///     .IIF NE,...NUM-2 ...BR=BRIT
+    /// ```
+    ///
+    /// so a two-argument call draws at brightness zero and a three-argument one
+    /// takes the brightness given. Outside any expansion the count is zero,
+    /// which is what MACRO-11 reports for a `.NARG` at file level.
+    fn narg_dir(&mut self, args: Line) {
+        if !self.active() {
+            return;
+        }
+        let name = match args.first().map(|t| &t.tok) {
+            Some(Tok::Symbol(s)) => s.clone(),
+            Some(Tok::Prefix(m)) => m.name().to_string(),
+            _ => {
+                self.errors.push(".NARG needs a symbol to define".into());
+                return;
+            }
+        };
+        let n = self.narg.last().copied().unwrap_or(0);
+        self.define(&name, n as u16, false);
+    }
+
     /// `.IRP` and `.IRPC`. They differ only in how the item list is cut:
     /// `.IRP` takes comma-separated items, `.IRPC` one character each.
     fn irp_block(&mut self, args: Line, lines: &[Line], idx: usize, per_char: bool) -> usize {
@@ -1664,7 +1737,21 @@ impl<'a> Assembler<'a> {
     }
 
     fn test_condition(&mut self, args: Line) -> Option<bool> {
-        let fields = split_commas(args);
+        let split = split_commas(args);
+        // The condition may be separated from its argument by a blank rather
+        // than a comma — `ALLANG.MAC:17` writes `.IF EQ ...NUM-1`, the same
+        // licence `.IIF` takes at `ALVROM.MAC:86`. Without it the argument goes
+        // missing, every such condition reads false, and the `.IFF` arm runs
+        // instead: that is how `ASCVH <GAME OVER>` reached `.BYTE ...AR1` and
+        // reported the word `OVER` as an unexpected symbol.
+        let mut fields: Vec<&[Token]> = Vec::with_capacity(split.len() + 1);
+        if let Some(first) = split.first() {
+            fields.push(&first[..1.min(first.len())]);
+            if first.len() > 1 {
+                fields.push(&first[1..]);
+            }
+        }
+        fields.extend(split.iter().skip(1).copied());
         let name = match fields.first().and_then(|f| f.first()) {
             Some(t) => match &t.tok {
                 Tok::Symbol(s) => s.clone(),
@@ -1905,18 +1992,6 @@ fn operand_text(operand: &[Token]) -> String {
         }
     }
     out
-}
-
-fn comma_token() -> Token {
-    Token {
-        tok: Tok::Punct(','),
-        span: crate::lexer::Span {
-            file: "<synthetic>".into(),
-            line: 0,
-            col: 0,
-        },
-        space_before: false,
-    }
 }
 
 fn split_lines(toks: &[Token]) -> Vec<&[Token]> {
@@ -2752,6 +2827,85 @@ mod tests {
             a.locals.contains_key("INCLUD") && !a.locals.contains_key("INCLUDE"),
             "stored under the truncated key"
         );
+    }
+
+    #[test]
+    fn if_condition_may_be_separated_by_a_blank() {
+        // ALLANG.MAC:17's `.IF EQ ...NUM-1`, guarding a one-or-two argument
+        // message macro. The .IFF arm must run only for the two-argument call.
+        let src = "	.MACRO ASCVH ...AR1,...AR2\n\
+                   	.NARG ...NUM\n\
+                   	.IF EQ ...NUM-1\n	.BYTE 0FF\n	.IFF\n	.BYTE ...AR1\n	.ENDC\n\
+                   	.ENDM\n\
+                   	.=0A000\n	ASCVH 7\n	ASCVH 3,9\n";
+        let img = asm(&[("MAIN.MAC", src)]).expect("assembly failed");
+        assert_eq!(bytes(&img, 0xA000, 2), vec![0xFF, 3]);
+    }
+
+    #[test]
+    fn caret_c_complements_the_term() {
+        // ALHARD.MAC:183's LED table, in the three shapes it uses: a bare
+        // symbol, and a bracketed subexpression.
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.=0A000\n\
+             MLED1	=2\n\
+             MLED2	=1\n\
+             	.BYTE 0FF,^CMLED1,^CMLED2,^C<MLED1!MLED2>\n",
+        )])
+        .expect("assembly failed");
+        assert_eq!(bytes(&img, 0xA000, 4), vec![0xFF, 0xFD, 0xFE, 0xFC]);
+    }
+
+    #[test]
+    fn narg_counts_the_arguments_of_this_expansion() {
+        // ALVROM.MAC:68's idiom: the third argument is optional, and .NARG is
+        // how the macro tells which call it is in. The nested call also proves
+        // the count belongs to the innermost expansion, not the outermost.
+        let src = "	.MACRO CVEC NEWX,BRIT\n\
+                   	.NARG ...NUM\n\
+                   	.IIF EQ,...NUM-1 .BYTE NEWX,0\n\
+                   	.IIF NE,...NUM-1 .BYTE NEWX,BRIT\n\
+                   	.ENDM\n\
+                   	.MACRO MVEC NEWX\n	CVEC NEWX,6\n	.ENDM\n\
+                   	.=0A000\n	CVEC 1\n	CVEC 2,3\n	MVEC 4\n";
+        let img = asm(&[("MAIN.MAC", src)]).expect("assembly failed");
+        assert_eq!(bytes(&img, 0xA000, 6), vec![1, 0, 2, 3, 4, 6]);
+    }
+
+    #[test]
+    fn iif_statement_may_be_separated_by_a_blank() {
+        // ALVROM.MAC:86's shape: the statement is a macro call whose own
+        // arguments carry the comma that used to be mistaken for the separator.
+        let src = "	.MACRO PAIR A,B\n	.BYTE A\n	.BYTE B\n	.ENDM\n\
+                   	.=0A000\n\
+                   ...NUM=2\n\
+                   	.IIF EQ,...NUM-2 PAIR 1,2\n\
+                   	.IIF NE,...NUM-2 PAIR 3,4\n";
+        let img = asm(&[("MAIN.MAC", src)]).expect("assembly failed");
+        // The true branch ran and the false one did not: 1,2 and nothing after.
+        assert_eq!(bytes(&img, 0xA000, 2), vec![1, 2]);
+        assert_eq!(img.get(&0xA002), None, "the failing condition emitted");
+    }
+
+    #[test]
+    fn radix_restores_from_a_symbol() {
+        // HLL65.MAC:27's save-and-restore, in miniature. Under radix 16 the
+        // literal `10` in `...RD=10` is sixteen; `.RADIX 10.` then drops to
+        // decimal for the macro body, and `.RADIX ...RD` must read sixteen back
+        // out of the symbol. If the symbolic operand is ignored the radix stays
+        // at 10 and `0F` is no longer a number at all.
+        let img = asm(&[(
+            "MAIN.MAC",
+            "	.RADIX 16\n\
+             	.=0A000\n\
+             ...RD=10\n\
+             	.RADIX 10.\n\
+             	.RADIX ...RD\n\
+             	.BYTE 0F\n",
+        )])
+        .expect("assembly failed");
+        assert_eq!(bytes(&img, 0xA000, 1), vec![0x0F]);
     }
 
     #[test]

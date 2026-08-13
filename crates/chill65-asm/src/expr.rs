@@ -261,8 +261,9 @@ pub fn eval(toks: &[Token], ctx: &Context) -> Result<Eval, ExprError> {
 fn operand(toks: &[Token], mut i: usize, ctx: &Context) -> Result<(Eval, usize), ExprError> {
     let start = i;
 
-    // Unary prefixes stack: -X, +5, and combinations thereof.
+    // Unary prefixes stack: -X, +5, ^CX, and combinations thereof.
     let mut negate = false;
+    let mut complement = false;
     loop {
         match toks.get(i).map(|t| &t.tok) {
             Some(Tok::Punct('-')) => {
@@ -270,6 +271,13 @@ fn operand(toks: &[Token], mut i: usize, ctx: &Context) -> Result<(Eval, usize),
                 i += 1;
             }
             Some(Tok::Punct('+')) => {
+                i += 1;
+            }
+            // `^C` — ones-complement, as `ALHARD.MAC:183` writes it:
+            //     LITSON:	.BYTE 0FF,^CMLED1,^CMLED2,^C<MLED1!MLED2>
+            // It binds to the term, so it is applied before any negation.
+            Some(Tok::Complement) => {
+                complement = !complement;
                 i += 1;
             }
             _ => break,
@@ -280,6 +288,7 @@ fn operand(toks: &[Token], mut i: usize, ctx: &Context) -> Result<(Eval, usize),
     i += used;
 
     if let Eval::Value(v) = val {
+        let v = if complement { !v } else { v };
         val = Eval::Value(if negate { v.wrapping_neg() } else { v });
     }
 

@@ -47,6 +47,11 @@ pub enum Dir {
     /// bracketed argument. Absent from Crystal Castles; Space Duel uses it five
     /// times, all inside string-to-character-code macros.
     Nchr,
+    /// `.NARG SYM` — define SYM as the number of arguments the innermost open
+    /// macro expansion was called with. Absent from both earlier titles;
+    /// Tempest's picture ROM leans on it to make a macro's last argument
+    /// optional, as `ALVROM.MAC:69` does for `CVEC`'s brightness.
+    Narg,
     Endr,
     Error,
     Globl,
@@ -98,6 +103,7 @@ pub fn classify(name: &str) -> Option<Dir> {
         ".IRP" => Dir::Irp,
         ".IRPC" => Dir::Irpc,
         ".NCHR" => Dir::Nchr,
+        ".NARG" => Dir::Narg,
         ".ENDR" => Dir::Endr,
         ".ERROR" => Dir::Error,
         ".GLOBL" => Dir::Globl,

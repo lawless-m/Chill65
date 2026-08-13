@@ -146,6 +146,13 @@ pub enum Tok {
     /// Which one it is depends on macro context, so the decision is deferred to
     /// the macro engine rather than guessed at here.
     Quote,
+    /// `^C` — ones-complement of the term that follows.
+    ///
+    /// The lexer has to own this one. `^C` is followed by an ordinary symbol,
+    /// so leaving the caret as punctuation glues the operator letter onto the
+    /// name and `^CMLED1` in `ALHARD.MAC:183` becomes a symbol called
+    /// `CMLED1`.
+    Complement,
     Punct(char),
     /// End of a source line. Significant: this is a line-oriented assembler.
     Eol,
@@ -434,6 +441,17 @@ impl Lexer {
                     'O' => Some(8),
                     _ => None,
                 };
+                // `^C` is the ones-complement operator, not a radix, and it is
+                // taken here for the reason `Tok::Complement` records.
+                if b[i + 1].to_ascii_uppercase() == 'C' {
+                    out.push(Token {
+                        tok: Tok::Complement,
+                        span: span(i),
+                        space_before: gap,
+                    });
+                    i += 2;
+                    continue;
+                }
                 if let Some(r) = r {
                     let mut j = i + 2;
                     while j < b.len() && b[j].is_ascii_alphanumeric() {
