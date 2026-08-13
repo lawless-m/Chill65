@@ -222,6 +222,18 @@ pub struct Assembler<'a> {
     pub sec_size: HashMap<String, u16>,
     /// Where each section was placed. Empty during the sizing probe.
     pub sec_base: HashMap<String, u16>,
+    /// Where [`place_sections`] starts laying the relocatable region out.
+    ///
+    /// Per title, because it is a property of the link rather than of the
+    /// assembler. Space Duel's [`SECTION_ORIGIN`] had to be *inferred* from
+    /// byte runs in its oracle, as that constant's own derivation records.
+    /// Tempest's is simply stated: `ALEXEC.MAP`'s Section Summary opens with
+    /// `. ABS. 0000 A8B0 ABS,OVR` and puts the first relocatable section at
+    /// `A8B0`, because that title's load map survives and Space Duel's does
+    /// not.
+    ///
+    /// [`place_sections`]: Assembler::place_sections
+    pub section_origin: u16,
     /// True while measuring sizes, before any base is known.
     probing: bool,
 }
@@ -324,6 +336,7 @@ impl<'a> Assembler<'a> {
             sec_off: HashMap::new(),
             sec_size: HashMap::new(),
             sec_base: HashMap::new(),
+            section_origin: SECTION_ORIGIN,
             probing: false,
         }
     }
@@ -694,7 +707,37 @@ impl<'a> Assembler<'a> {
         let Some(def) = self.macros.get(&key).cloned() else {
             return;
         };
-        let argv = split_args(args);
+        let mut argv = split_args(args);
+        // `\SYM` passes a symbol's *value*, as text, rather than its name.
+        //
+        // This is how HLL65 gives every nesting depth its own label.
+        // `HLL65.MAC:29` opens a construct with `.LOC. \...X` and `.LOC.`
+        // defines `S'...1`, so depth 2 must define `S2` — with the backslash
+        // left alone, every depth defines one shared symbol called `S\...X`
+        // instead, each construct overwrites the last, and a loop closes onto
+        // whichever `BEGIN` or `IF` ran most recently.
+        //
+        // The value is rendered in the current radix, which is why `HLL65.MAC`
+        // takes the trouble to set `.RADIX 10.` around every use: under the
+        // ambient 16 a tenth nesting level would otherwise be `SA`. HLL65F
+        // needs none of this — it carries the same nesting on `.PUSH`/`.POP`
+        // stacks — so no earlier title reached this path.
+        for arg in &mut argv {
+            if !matches!(arg.first().map(|t| &t.tok), Some(Tok::Punct('\\'))) {
+                continue;
+            }
+            let v = self.eval_here(&arg[1..]).unwrap_or(0);
+            let first = arg[0].clone();
+            *arg = vec![Token {
+                tok: Tok::Number {
+                    text: radix_text(v, self.radix),
+                    forced_decimal: false,
+                    explicit_radix: None,
+                },
+                span: first.span,
+                space_before: first.space_before,
+            }];
+        }
         let body = match def.expand(&argv, &mut self.gensym) {
             Ok(b) => b,
             Err(e) => {
@@ -1576,11 +1619,7 @@ impl<'a> Assembler<'a> {
             self.errors.push(".NCHR needs a symbol to define".into());
             return;
         };
-        let text: String = list
-            .iter()
-            .filter(|t| !matches!(t.tok, Tok::Punct('<') | Tok::Punct('>')))
-            .map(crate::macros::token_text)
-            .collect();
+        let text = angle_text(&list);
         self.define(&name, text.chars().count() as u16, false);
     }
 
@@ -1689,15 +1728,10 @@ impl<'a> Assembler<'a> {
                         // at a case with no evidence behind it.
                         match inner.first() {
                             Some(first) => {
-                                let text: String = inner
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, t)| {
-                                        let sep =
-                                            if i > 0 && t.space_before { " " } else { "" };
-                                        format!("{sep}{}", crate::macros::token_text(t))
-                                    })
-                                    .collect();
+                                // `angle_text` keeps a *trailing* blank too: it
+                                // reads the brackets rather than discarding
+                                // them, which is where that blank is recorded.
+                                let text: String = angle_text(&list);
                                 text.chars()
                                     .map(|c| {
                                         vec![Token {
@@ -1792,8 +1826,8 @@ impl<'a> Assembler<'a> {
         }
     }
 
-    /// Lay the measured sections out end to end from [`SECTION_ORIGIN`], in
-    /// first-encounter order.
+    /// Lay the measured sections out end to end from [`Self::section_origin`],
+    /// in first-encounter order.
     ///
     /// First-encounter order is link order: the roots are assembled in
     /// `SDGEN1.COM`'s sequence, so a section is met when the first module
@@ -1801,7 +1835,7 @@ impl<'a> Assembler<'a> {
     /// that same order (`inventory.md` §7 item 3l), which is what concatenation
     /// looks like from the outside.
     pub fn place_sections(&mut self, order: &[String], sizes: &HashMap<String, u16>) {
-        let mut addr = SECTION_ORIGIN;
+        let mut addr = self.section_origin;
         for name in order {
             self.sec_base.insert(name.clone(), addr);
             addr = addr.wrapping_add(sizes.get(name).copied().unwrap_or(0));
@@ -1992,6 +2026,61 @@ fn operand_text(operand: &[Token]) -> String {
         }
     }
     out
+}
+
+/// The text inside `<...>`, with its blanks intact.
+///
+/// A blank is content, and the delimiters are where the evidence for a trailing
+/// one lives: the lexer records whitespace as `space_before` on the *following*
+/// token, so the blank in `<PLAYER >` belongs to the closing bracket and
+/// dropping the brackets drops the blank with them.
+///
+/// `ALLANG.MAC:103` writes `ASCVH 0CD,<PLAYER >`, and `ASCVG.MAC` encodes that
+/// blank as a character like any other — `..X=0`, the blank glyph — then ORs
+/// the end-of-message flag into whichever character turns out to be last. Lose
+/// the blank and the message is a byte short *and* the flag lands on the `R`.
+/// Inside the brackets *every* blank is content, leading ones included —
+/// `ALVROM.MAC:1229` writes `.IRPC X,< PLAYER GAMES>`, and that opening blank
+/// is a character the picture ROM draws. Without brackets the leading gap is
+/// only the separator that introduced the argument, so it is not.
+fn angle_text(list: &[Token]) -> String {
+    let mut out = String::new();
+    let mut started = false;
+    let mut bracketed = false;
+    for t in list {
+        match t.tok {
+            Tok::Punct('<') => bracketed = true,
+            Tok::Punct('>') => {
+                if (started || bracketed) && t.space_before {
+                    out.push(' ');
+                }
+            }
+            _ => {
+                if (started || bracketed) && t.space_before {
+                    out.push(' ');
+                }
+                out.push_str(&crate::macros::token_text(t));
+                started = true;
+            }
+        }
+    }
+    out
+}
+
+/// Render a value in `radix`, for the `\SYM` macro argument form.
+fn radix_text(v: u16, radix: u32) -> String {
+    if v == 0 {
+        return "0".into();
+    }
+    let digits = b"0123456789ABCDEF";
+    let mut out = Vec::new();
+    let mut n = v as u32;
+    while n > 0 {
+        out.push(digits[(n % radix) as usize]);
+        n /= radix;
+    }
+    out.reverse();
+    String::from_utf8(out).expect("digits are ASCII")
 }
 
 fn split_lines(toks: &[Token]) -> Vec<&[Token]> {

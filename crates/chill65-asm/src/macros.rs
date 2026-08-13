@@ -165,7 +165,15 @@ pub fn split_args(toks: &[Token]) -> Vec<Vec<Token>> {
             // The opening bracket may only close at the very last token.
             depth > 0 || i == arg.len() - 1
         });
-        if spans_all {
+        // A blank before the closing bracket is *content*, and the bracket is
+        // the only token that records it: whitespace is stored as
+        // `space_before` on the token that follows, and after the last piece of
+        // text there is nothing else to carry it. `ALLANG.MAC:103` writes
+        // `ASCVH 0CD,<PLAYER >`, whose trailing blank `ASCVG.MAC` encodes as a
+        // character in its own right. So in that one case the delimiters stay,
+        // which costs nothing: `<...>` is a grouping to the expression parser
+        // too, and the argument reaches `.NCHR`/`.IRPC` re-wrapped either way.
+        if spans_all && !arg[arg.len() - 1].space_before {
             arg.remove(arg.len() - 1);
             arg.remove(0);
         }

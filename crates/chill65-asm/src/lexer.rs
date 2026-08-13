@@ -185,7 +185,24 @@ impl Token {
                 explicit_radix,
             } => {
                 let r = explicit_radix.unwrap_or(if *forced_decimal { 10 } else { radix });
-                u32::from_str_radix(text, r).ok()
+                // Digits are accumulated positionally and are *not* range
+                // checked against the radix, which is not what
+                // `from_str_radix` does. `ALVROM.MAC:1212` writes
+                //
+                //     VCTR -24.*15.,-6C.,0
+                //
+                // where the trailing dot forces decimal and `C` is not a
+                // decimal digit at all. The original toolchain read it anyway,
+                // as 6*10+12, and `TEMPST.LDA` carries the result: that vector
+                // is stored with dx = -72 beside dy = -360, and -360 is
+                // `-24.*15.` exactly. So the value is whatever the accumulation
+                // produces, and only a character outside 0-9 A-F is rejected.
+                let mut v: u32 = 0;
+                for c in text.chars() {
+                    let d = c.to_digit(16)?;
+                    v = v.checked_mul(r)?.checked_add(d)?;
+                }
+                Some(v)
             }
             _ => None,
         }
@@ -351,7 +368,18 @@ impl Lexer {
             // Crystal Castles contains exactly one non-radix caret and its
             // delimiter would be alphanumeric, so that corpus cannot reach
             // this branch.
-            if c == '^' && i + 1 < b.len() && !b[i + 1].is_ascii_alphanumeric() {
+            //
+            // Nor may the delimiter be a blank. `ALLANG.MAC:213` writes
+            // `ASCVH <^ MCMLXXX ATARI>`, where the caret is the copyright
+            // glyph in Tempest's own character set and the blanks are text.
+            // Read as a delimiter, the first blank swallows the caret and the
+            // second closes the string, so the message loses three characters
+            // and arrives as `MCMLXXXATARI`.
+            if c == '^'
+                && i + 1 < b.len()
+                && !b[i + 1].is_ascii_alphanumeric()
+                && !b[i + 1].is_ascii_whitespace()
+            {
                 let delim = b[i + 1];
                 let start = i + 2;
                 let mut j = start;
