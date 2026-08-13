@@ -13,13 +13,21 @@
 #
 # Everything is built under target/, so plain `cargo build` never needs
 # verilator and the workspace stays dependency-free.
+#
+# Usage: build-mister-sim.sh [RTL_PARENT_DIR [OUT_DIR]]
+#
+# Both default to the vendored core and target/mister-sim. They are arguments
+# so that an experiment can build a *modified copy* of the RTL and compare it
+# against the original, which is the only way to try a fix without editing
+# reference material. The copy is the thing that gets edited; this directory
+# never is.
 
 set -e
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-MISTER="$ROOT/Arcade-CrystalCastles_MiSTer"
+MISTER=${1:-"$ROOT/Arcade-CrystalCastles_MiSTer"}
 SIM="$ROOT/crates/chill65-diff/sim"
-OUT="$ROOT/target/mister-sim"
+OUT=${2:-"$ROOT/target/mister-sim"}
 
 if [ ! -d "$MISTER/rtl" ]; then
     echo "build-mister-sim: $MISTER/rtl not found — clone the MiSTer core first" >&2

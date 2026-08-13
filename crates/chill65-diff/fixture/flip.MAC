@@ -1,0 +1,325 @@
+; A cocktail-flip geometry fixture.
+;
+; ORIGINAL WORK. Nothing here comes from the game source, and it is committable
+; for the same reason `mob.MAC` is: it is a program we wrote, exercising
+; hardware we modelled. The one thing it borrows is an *arithmetic convention*
+; -- the constants the game uses to mirror an object's coordinates -- which is
+; a fact about the hardware, not a copied routine.
+;
+; # Why it exists
+;
+; The MiSTer core's README carries one known issue: "In cocktail mode the
+; player 2 upside down screen and sprites are not positioned correctly." The
+; flip cannot be calibrated on a recorded trace, because attract mode never
+; sets `HW.FLV` -- only `WV.RSW` does, when the cocktail switch is on and the
+; players swap. So the flip bit is unreachable from anything we can record.
+;
+; This program reaches it directly. It draws a fixed picture, waits, sets
+; `PLAYER2`, and idles. One capture therefore contains the same scene both
+; ways up, and the two halves of that capture are the measurement.
+;
+; # The division of labour it assumes
+;
+; The game source settles who mirrors what, and the fixture reproduces it
+; exactly:
+;
+;   - object *positions* are mirrored in SOFTWARE. `EN.PMV` (CWV.MAC) does
+;     `EOR #0FF / ADD #0D9` to the vertical byte and `EOR #0FF / ADD #0FD` to
+;     the horizontal one, and writes the results straight into the table.
+;   - object *pictures* are mirrored in HARDWARE -- the row XOR, the half swap
+;     and the LSB-first shift in `MotionObjectPictureRom.v`.
+;   - the bitmap is mirrored ENTIRELY in hardware. The game adjusts the
+;     horizontal scroll by three (`CIN.MAC`, `ORA #3`) and adjusts the vertical
+;     scroll NOT AT ALL, so whatever the vertical flip is, the hardware does it
+;     unaided.
+;
+; That last asymmetry is what this fixture is pointed at.
+;
+; # What it draws
+;
+; A pseudo-random texture over every visible bitmap row, so that an alignment
+; measured from it has one peak rather than a ridge; two markers of pixel
+; value 15, a value the texture never produces; and one motion object beside
+; each marker. A marker and its object start on the same line.
+;
+; Mirror a picture and a block spanning rows [t,b] lands at [C-b, C-t] for
+; some constant C. Measuring C from the markers gives the bitmap's mirror;
+; measuring it from the objects gives the objects' mirror. If the hardware is
+; right the two are the same number, and no unknown pipeline constant has to
+; be known to say so.
+
+PTR	= 010			;  bitmap write pointer, low
+PTRH	= 011			;  and high
+RSEED	= 012			;  this row's texture seed
+CNT	= 013			;  rows remaining
+
+COLTAB	= 0400			;  128 column values, in bitmap row 8
+
+	.=0E000
+
+; ---------------------------------------------------------------- entry
+START::	SEI
+	CLD
+	LDX I,0FF
+	TXS
+
+; The OUT1 latch, one bit per address, sampling D3. Auto-increment off, since
+; every bitmap write below is a direct store and none of them goes through the
+; 0002 window. PLAYER2 clear: the picture starts upright.
+	LDA I,0FF
+	STA 09F00		;  AXn  -- x auto-step off
+	STA 09F01		;  AYn  -- y auto-step off
+	LDA I,00
+	STA 09F02		;  XINCn
+	STA 09F03		;  YINCn
+	STA 09F04		;  PLAYER2
+	STA 09F05		;  SIREn
+	STA 09F06
+	STA 09F07		;  BUF1BUF2n -- the 8E00 table
+
+; Scroll, as the game leaves it for an unscrolled screen: VSLD 18, HSLD 0.
+; VSLD 18 is also the reset value, so this states it rather than changing it.
+	LDA I,018
+	STA 09D00
+	LDA I,00
+	STA 09C80
+
+; ------------------------------------------------------------- colour RAM
+; Thirty-two entries of nine bits. A write to 9FA0+n sets entry n with bit 8
+; high and the byte supplies the other eight, so one pass over the strip
+; paints the whole palette.
+;
+; Distinctness is the point: a measurement that reads positions out of a
+; capture cannot separate two things the palette has made the same colour. So
+; every colour a feature can wear is unique, and everything else is black.
+	LDX I,00
+CRAM:	LDA AX,PALET
+	STA AX,09FA0
+	INX
+	CPX I,020
+	BNE CRAM
+
+; --------------------------------------------------------- column values
+; An eight-bit Galois orbit, 128 of them, parked in bitmap row 8 -- above the
+; visible window in both orientations, so it is scratch that can never be
+; seen. The texture below is COLUMN(c) EOR ROW(r): a product of two
+; independent orbits, which unlike a ramp or a single stream has no
+; translational self-similarity to alias the alignment onto.
+	LDA I,0A5
+	LDX I,00
+COL:	ASL
+	BCC COL1
+	EOR I,01D
+COL1:	STA AX,COLTAB
+	INX
+	CPX I,080
+	BNE COL
+
+; ------------------------------------------------------------ the texture
+; Rows 24 to 255, every one of them: the visible window is 232 lines, and a
+; flip that is out by any amount will land on rows the upright picture also
+; showed only if all of them carry something.
+;
+; Every nibble is forced even, which reserves pixel value 15 for the markers.
+	LDA I,03C
+	STA Z,RSEED
+	LDA I,00
+	STA Z,PTR
+	LDA I,0C		;  0C00 = row 24 * 128
+	STA Z,PTRH
+	LDA I,0E8		;  232 rows
+	STA Z,CNT
+
+ROW:	LDA Z,RSEED		;  step the row seed
+	ASL
+	BCC ROW1
+	EOR I,01D
+ROW1:	STA Z,RSEED
+
+	LDY I,07F
+FILL:	LDA AY,COLTAB
+	EOR Z,RSEED
+	AND I,0EE
+	STA NY,PTR
+	DEY
+	BPL FILL
+
+	STA 09E00		;  pet the watchdog: eight vblanks and it resets
+
+	LDA Z,PTR		;  next row
+	CLC
+	ADC I,080
+	STA Z,PTR
+	LDA Z,PTRH
+	ADC I,00
+	STA Z,PTRH
+	DEC Z,CNT
+	BNE ROW
+
+; ------------------------------------------------------------- the markers
+; Sixteen rows of four bytes -- eight pixels -- of value 15, which the texture
+; cannot produce. Marker A covers bitmap rows 88-103 at pixels 48-55, marker B
+; rows 168-183 at pixels 160-167. With VSLD at 18 the row displayed on visible
+; line L is L, so A stands on lines 88-103 and B on lines 168-183.
+	LDA I,018		;  2C00 + 18: row 88, byte column 24
+	STA Z,PTR
+	LDA I,02C
+	STA Z,PTRH
+	JSR MARK
+
+	LDA I,050		;  5400 + 50: row 168, byte column 80
+	STA Z,PTR
+	LDA I,054
+	STA Z,PTRH
+	JSR MARK
+
+; ---------------------------------------------------------- park the table
+; All 64 entries, F0 in every byte. A vertical position of F0 puts the match
+; window at VC 00-0F, which no visible line reaches.
+	LDA I,0F0
+	LDX I,00
+PARK:	STA AX,08E00
+	STA AX,08F00
+	INX
+	BNE PARK
+
+; -------------------------------------------------------- plant the objects
+; Byte 0 picture, byte 1 vertical position, byte 2 bit 7 = MPI, byte 3
+; horizontal position. An object's first row is the line where VC + V first
+; reaches F0, so V = F0 - line.
+;
+; Object A: line 88, the first line of marker A, at pixel 64 -- sixteen to the
+; right of the marker, so the two never overlap and each can be found on its
+; own.
+	LDA I,01
+	STA 08E00
+	LDA I,098		;  F0 - 58 = 98: line 88
+	STA 08E01
+	LDA I,00
+	STA 08E02
+	LDA I,040		;  pixel 64
+	STA 08E03
+
+; Object B: line 168, the first line of marker B, at pixel 176.
+	LDA I,01
+	STA 08E04
+	LDA I,048		;  F0 - 0A8 = 48: line 168
+	STA 08E05
+	LDA I,00
+	STA 08E06
+	LDA I,0B0		;  pixel 176
+	STA 08E07
+
+; ------------------------------------------------------- settle, then flip
+; Eight frames upright. The capture is read by finding the one frame boundary
+; where the picture changes, so both sides of it must be still.
+	LDX I,08
+SETTLE:	JSR FRAME
+	DEX
+	BNE SETTLE
+
+; FRAME returns just after VBLANK begins, and everything below fits inside the
+; 24 lines of it, so exactly one captured frame separates the two pictures.
+	JSR FLIP
+
+; ------------------------------------------------------------------ idle
+; Nothing further touches anything. The watchdog is strobed so the machine
+; stays alive; a board that stopped being petted would reset and the picture
+; would go away.
+IDLE::	STA 09E00
+	JMP IDLE
+
+; ----------------------------------------------------------- the flip
+; The game's own cocktail transform, applied to the same table the video
+; hardware is already reading, followed by the scroll adjustment and the latch
+; bit itself.
+;
+; The two constants are EN.PMV's. Note what they are NOT: there is no
+; adjustment to the vertical scroll to go with the horizontal ORA #3, because
+; the game does not make one.
+FLIP:	LDA 08E01		;  object A vertical
+	EOR I,0FF
+	CLC
+	ADC I,0D9
+	STA 08E01
+	LDA 08E03		;  object A horizontal
+	EOR I,0FF
+	CLC
+	ADC I,0FD
+	STA 08E03
+
+	LDA 08E05		;  object B vertical
+	EOR I,0FF
+	CLC
+	ADC I,0D9
+	STA 08E05
+	LDA 08E07		;  object B horizontal
+	EOR I,0FF
+	CLC
+	ADC I,0FD
+	STA 08E07
+
+	LDA I,03		;  HSLD: the game's ORA #3, with HSV zero
+	STA 09C80
+	LDA I,0FF		;  PLAYER2
+	STA 09F04
+	RTS
+
+; ------------------------------------------------------------ subroutines
+; Sixteen rows of four bytes of FF from PTR, stepping a row each time.
+MARK:	LDX I,010
+MARK1:	LDA I,0FF
+	LDY I,03
+MARK2:	STA NY,PTR
+	DEY
+	BPL MARK2
+	LDA Z,PTR
+	CLC
+	ADC I,080
+	STA Z,PTR
+	LDA Z,PTRH
+	ADC I,00
+	STA Z,PTRH
+	DEX
+	BNE MARK1
+	RTS
+
+; Wait for the start of the next VBLANK, petting the watchdog throughout.
+; Leaves the machine just inside VBLANK, which is where the game does its own
+; table and scroll writes.
+FRAME:	STA 09E00
+	LDA 09600
+	AND I,020
+	BNE FRAME		;  outside VBLANK first
+FRAME1:	STA 09E00
+	LDA 09600
+	AND I,020
+	BEQ FRAME1		;  then wait for it to begin
+	RTS
+
+; -------------------------------------------------------------- the palette
+; Thirty-two bytes, written through the 9FA0 strip so bit 8 -- the top bit of
+; red -- is high in every one.
+;
+; Only three levels per component are used: stored 7, 5 and 0, which display
+; as 0, 2 and 7 because the strip is active-low. That restriction is
+; deliberate. The simulation scales a three-bit component linearly while
+; `cram_rgb` sends it through the measured resistor ladder, and the two agree
+; on 0, 2 and 7 and on nothing else. Staying inside the agreement means this
+; fixture's colours can be predicted by either route -- and it sidesteps a
+; disagreement that is not ours to settle here.
+;
+; Every object colour carries red 2 and every bitmap colour red 0, so the two
+; layers are separable by one component alone.
+PALET:
+	.BYTE 0FF,07F,07D,0FF,078,0FF,0FF,0FF	;  1 object body, 2 and 4 its ends
+	.BYTE 0FF,0FF,0FF,0FF,0FF,0FF,0FF,0FF
+	.BYTE 0FF,0FF,0FD,0FF,0F8,0FF,0EF,0FF	;  16 bitmap 0 = black, then evens
+	.BYTE 0ED,0FF,0E8,0FF,0C7,0FF,0C5,0C0	;  31 = pixel 15, the marker
+
+; Vectors. No interrupts are taken -- I is set and never cleared -- but the
+; vectors must exist.
+	.=0FFFA
+	.WORD START
+	.WORD START
+	.WORD START

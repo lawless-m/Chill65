@@ -259,16 +259,71 @@ lines**. So 256×232, as the plan had it.
   (`CCastles.v:180`). The clamp is load-bearing: `vi` is 8-bit, so a large
   scroll wraps past 255 and the bottom of the screen repeats row `0x18`.
 
-**UNVERIFIED:** the exact phase of both counters — whether visible line *n* uses
-`vr + n` or `vr + n ± 1`, and the corresponding horizontal offset. The model
-uses `vr + n` and `hs + px`. This is the residue of open question **O4** (the
-Potato chip), which the MiSTer core's own author flags as not fully
-characterised. A one-line or one-pixel offset would not show up in any test
-written so far.
+**MEASURED:** the phase of both counters, by planting markers at known bitmap
+addresses and reading back where the core put them (`flip_fixture.rs`).
+Vertically, visible line *n* shows row `vr + n` — the model's assumption, now
+confirmed. Horizontally the core's **first emitted column shows `hs + 2`**, not
+`hs + 0`. The model uses `hs + px` and so does MAME (`effx = hscroll + x`), so
+the core's bitmap scan sits **two columns** from where both models put it.
 
-**UNVERIFIED:** cocktail flip. `PLAYER2` (OUT1 bit 4, `HW.FLP` at `9F04`)
-reverses both counters' direction (`CCastles.v:166`, `:194`). The latch bit is
-stored but the flip is not modelled.
+That gap has always been there and no test has ever failed for it: the only
+comparison that puts our pixels beside the core's is a report rather than a
+gate, and the fixture that *is* a gate draws no bitmap. It is not idle — §5.9
+shows it doubling into a visible fault the moment the picture is flipped. Which
+side is wrong is still open, and is the residue of open question **O4** (the
+Potato chip), which the MiSTer core's own author flags as not characterised.
+
+### 5.9 Cocktail flip (**measured**)
+
+`PLAYER2` (OUT1 bit 4, `HW.FLP` at `9F04`) reverses both scan counters
+(`CCastles.v:166`, `:194`) and mirrors each object's picture within itself
+(§13.3). It does **nothing to any object's position**. Those are mirrored by
+the game: `EN.PMV` in `CWV.MAC` complements each coordinate byte and adds a
+constant — `0D9` vertically, `0FD` horizontally — and `CIN.MAC` adjusts the
+horizontal scroll by three (`ORA #3`) and the vertical scroll not at all. MAME
+agrees about the division of labour: `ccastles.cpp:480` draws every object with
+`flipx = flipy = flip` at an unadjusted x and y.
+
+The asymmetry in what the game adjusts is the whole story. Since it never
+touches the vertical scroll, the hardware's vertical flip has to mirror the
+visible band on to itself unaided: line *n* must show row `vr + 231 - n`, the
+reverse of the upright `vr + n`. **The core counts down from `vr` instead**,
+giving `vr - n` — 25 rows adrift, with the `0x18` floor smearing the 25 lines
+that fall off the bottom of the count into a band of one repeated row.
+
+Measured on the verilated core, in mirror constants: flipping maps a block
+spanning `[t,b]` to `[C-b, C-t]`, and the bitmap and the objects have to agree
+about `C` or they part company on screen.
+
+| | vertical | horizontal |
+|---|---|---|
+| objects | 233 | 259 |
+| bitmap, the core as it stands | **256** | 255 |
+| bitmap, with `vi <= PLAYER2 ? vr + 8'd231 : vr` | **231** | 255 |
+
+A half-turn maps the 232 visible lines on to themselves, so the vertical
+constant has to be 231, and the one-line change reaches it: 23 lines of error
+become 2. What is left over is not the flip's doing at all.
+
+- **2 lines.** The object line buffer is filled on one line and displayed on the
+  next (§13.5). A delay does not mirror, so under flip it counts twice.
+- **4 pixels.** Twice the two-column bitmap phase in §5.6.
+
+Both are invisible upright, where neither layer has anything to be measured
+against. The flip is what doubles them into view — which is why the core's
+author recorded this as a sprite-positioning fault, and why his own outstanding
+list already suspected the sprite's horizontal location. Atari's constants say
+the two layers mirror about the same number on a real board; in the core they
+do not, and the residue names by how much.
+
+The one-line change is written up for its author as
+`tools/mister-cocktail-flip.patch`. It is **not applied** here: the vendored
+core is an oracle and is never modified, so the measurement above verilates a
+copy (`harness.md` §15.2).
+
+**Still not modelled.** Our runtime stores the latch bit and stops there
+(`harness.md` §4). Nothing above needs modelling to be true, but nothing above
+is exercised by our runtime either.
 
 ### 5.7 Nibble polarity — a resolved apparent contradiction
 
@@ -1038,7 +1093,8 @@ is wired**; its high nibble goes nowhere. Two fetches make an object **8 wide by
 
 `PLAYER2` (OUT1 bit 4, `HW.FLP`) mirrors both axes: it XORs the row with `0xF`,
 swaps which half is fetched first, and reads the shifters LSB-first instead of
-MSB-first (`MotionObjectPictureRom.v:104`).
+MSB-first (`MotionObjectPictureRom.v:104`). It mirrors the picture **inside**
+the object and leaves the object where it is; the game moves it (§5.9).
 
 ### 13.4 Arbitration, and what `MPI` means (**verified**)
 

@@ -30,7 +30,15 @@ about the hardware that are explicitly marked UNVERIFIED:
 The arbitration is implemented and checked on all 256 inputs, motion objects are
 modelled and agree with the verilated core to zero differing pixels, and the
 three-bit colour expansion has been measured against MAME rather than assumed
-linear. See §14 and `hardware.md` §13. The other five stand.
+linear. See §14 and `hardware.md` §13.
+
+**Claim 3 is now measured** and **claim 4 is now characterised**, both by
+`flip_fixture.rs`: the vertical scroll phase is `vr + n` as the model has it,
+the core's first emitted column is bitmap column `hs + 2` where the model and
+MAME both say `hs + 0`, and the cocktail flip is described in full at
+`hardware.md` §5.9 — including a fault in the core's vertical flip and the two
+pipeline phases it makes visible. Claim 4 stays on the list all the same: the
+flip is now *known* and still not *modelled*. The other four stand unchanged.
 
 Against any external oracle, divergence is therefore **expected output**, not
 failure. A gate demanding frame equality would be one the project cannot pass,
@@ -918,3 +926,58 @@ It had been there since Phase 3, invisible to every lit-pixel measurement
 because those count non-black, and invisible to `frame_hash` because that hashes
 addresses rather than colours. Only pixel equality could see it, and pixel
 equality was never gated on.
+
+## 15. The cocktail flip, and how a fixture measures a mirror
+
+`crates/chill65-diff/fixture/flip.MAC` and `tests/flip_fixture.rs`. The core's
+README carries one known issue — "In cocktail mode the player 2 upside down
+screen and sprites are not positioned correctly" — and nothing recordable
+reaches it: attract mode never sets `HW.FLV`, only `WV.RSW` does, when the
+cocktail switch is on and the players swap. So the fixture sets `PLAYER2`
+itself, half way through an otherwise still run, and one capture holds the same
+scene both ways up.
+
+### 15.1 Reading a mirror without knowing the pipeline
+
+Mirroring maps a block spanning `[t,b]` to `[C-b, C-t]` for a constant `C`. The
+fixture plants two bitmap markers of a pixel value its texture never produces,
+and one motion object beside each, so `C` can be read off the bitmap and off the
+objects **separately**. If the hardware is right the two are the same number.
+
+That comparison needs to know nothing about the core's pixel phase, its blanked
+columns, or the offset between an object's position byte and the column it lands
+on. Every such constant is common to the two orientations and cancels. It is
+also the complaint stated as arithmetic: "the sprites are in the wrong place"
+*is* the two mirrors disagreeing. `hardware.md` §5.9 has the numbers.
+
+The texture is `COLUMN(c) EOR ROW(r)` from two independent eight-bit orbits. A
+ramp or a single stream is self-similar under a whole family of shifts — a
+linear texture of the obvious kind aliases at exactly the 25-row displacement
+being measured — and a product of two orbits does not. A whole-field alignment
+over it corroborates the markers, and the test fails if the two disagree.
+
+### 15.2 The fix is measured on a copy
+
+`Arcade-CrystalCastles_MiSTer` is reference material and is never modified. The
+candidate one-line change is applied to a copy under `target/`, verilated
+separately, and put through the identical measurement — `mister::build_at` takes
+the RTL directory for exactly this reason, and `tools/build-mister-sim.sh` takes
+it as an argument. The patch is stated in the test as the text it replaces, so a
+vendored core that moved underneath would fail loudly rather than quietly
+measure the unpatched RTL twice.
+
+### 15.3 A palette caveat, which is really a defect
+
+The fixture's colours use only component levels 0, 2 and 7. That is not
+aesthetics: `sim/main.cpp`'s `scale3` expands three bits to eight **linearly**,
+while `video::cram_rgb` sends them through the resistor ladder §14.4 measured,
+and the two agree on 0, 2 and 7 and on nothing else. `scale3`'s comment still
+claims it matches `cram_rgb` exactly; it stopped being true when §14.4 corrected
+`cram_rgb`.
+
+So every ours-against-the-core pixel comparison is currently comparing two
+different colour expansions, and the divergence it reports is inflated by it.
+`mob.MAC` never noticed because its palette is black and white — levels 0 and 7,
+where the two agree. **Not fixed here**: the one-line correction belongs with
+whoever next runs that comparison for its own sake, not folded into a change
+about cocktail mode.

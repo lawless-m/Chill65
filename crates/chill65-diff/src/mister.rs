@@ -80,15 +80,31 @@ fn sim_dir() -> PathBuf {
     workspace_root().join("target/mister-sim")
 }
 
+/// The vendored core: the RTL every default build reads, and never writes.
+pub fn core_dir() -> PathBuf {
+    workspace_root().join("Arcade-CrystalCastles_MiSTer")
+}
+
 /// Build the simulation, if it is not already built.
 pub fn build() -> Result<PathBuf, String> {
-    let exe = sim_dir().join("mistersim");
+    build_at(&core_dir(), &sim_dir())
+}
+
+/// Build a simulation from `rtl_parent` into `out`, if it is not already built.
+///
+/// The pair is explicit so an experiment can verilate a *copy* of the RTL with
+/// a change applied and put the two side by side. Only a copy is ever edited —
+/// see this module's opening note.
+pub fn build_at(rtl_parent: &Path, dir: &Path) -> Result<PathBuf, String> {
+    let exe = dir.join("mistersim");
     if exe.exists() {
         return Ok(exe);
     }
     let script = workspace_root().join("tools/build-mister-sim.sh");
     let out = Command::new("sh")
         .arg(&script)
+        .arg(rtl_parent)
+        .arg(dir)
         .current_dir(workspace_root())
         .output()
         .map_err(|e| format!("{}: {e}", script.display()))?;
@@ -171,8 +187,34 @@ pub fn capture_trace(corpus: &Path, trace: &Trace, frames: u32) -> Result<Captur
 ///
 /// The blob is `DOWNLOAD_ORDER` end to end, 8192 bytes each.
 pub fn capture_blob(roms: &Path, trace: &Trace, frames: u32) -> Result<Capture, String> {
-    let exe = build()?;
-    let dir = sim_dir();
+    build()?;
+    capture_blob_in(&sim_dir(), roms, trace, frames)
+}
+
+/// As [`capture_blob`], but from a named simulation directory.
+///
+/// `dir` must already hold a built `mistersim` — [`build_at`] puts one there.
+/// The blob is copied in if it lives elsewhere, because the simulation is run
+/// with `dir` as its working directory and is given a bare filename.
+pub fn capture_blob_in(
+    dir: &Path,
+    roms: &Path,
+    trace: &Trace,
+    frames: u32,
+) -> Result<Capture, String> {
+    let exe = dir.join("mistersim");
+    if !exe.exists() {
+        return Err(format!("{} has no mistersim", dir.display()));
+    }
+    let roms = if roms.parent() == Some(dir) {
+        roms.to_path_buf()
+    } else {
+        let dest = dir.join(roms.file_name().ok_or("the blob has no filename")?);
+        std::fs::copy(roms, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+        dest
+    };
+    let roms = roms.as_path();
+    let dir = dir.to_path_buf();
     let raw = dir.join("frames.raw");
 
     // The same per-frame `<IN0 mask> <x> <y>` file MAME is given. Both oracles

@@ -1,0 +1,59 @@
+Arcade-CrystalCastles_MiSTer: fix the vertical cocktail flip
+
+For upstream (github.com/MiSTer-devel/Arcade-CrystalCastles_MiSTer), against
+the core's known issue: "In cocktail mode the player 2 upside down screen and
+sprites are not positioned correctly."
+
+WHY
+---
+With PLAYER2 set, the vertical scan counter is reloaded from the scroll
+register and counts *down* from it, so visible line n shows bitmap row
+vr - n. A screen flip has to show the same 232 rows in reverse, which is
+vr + 231 - n. The two differ by 25 rows, and the vs floor at CCastles.v:201
+then smears the 25 lines that fall off the bottom of the count into a band
+of one repeated row across the top of the flipped picture.
+
+The game cannot compensate and does not try. CIN.MAC adjusts the horizontal
+scroll for the flip (ORA #3) and the vertical scroll not at all, so the
+vertical mirror has to be the hardware's own work. Motion objects are not
+affected: the hardware mirrors each object's picture within itself, while
+CWV.MAC's EN.PMV mirrors the objects' coordinates in software. So the objects
+land correctly and the background does not, which is what makes it look like
+a sprite-positioning fault.
+
+MEASURED
+--------
+On the verilated core, driven by a fixture that plants bitmap markers and
+motion objects at known places and then sets PLAYER2 mid-run. Flipping maps a
+block spanning [t,b] to [C-b, C-t]; bitmap and objects must agree on C:
+
+                                    vertical   horizontal
+    motion objects                     233        259
+    bitmap, before                     256        255
+    bitmap, after this patch           231        255
+
+231 is what a half-turn of the 232 visible lines requires. The change takes
+the disagreement from 23 lines to 2.
+
+WHAT THIS PATCH DOES NOT FIX
+----------------------------
+The 2 lines and 4 pixels left over are not the flip's doing. They are twice a
+one-line and two-column phase difference between the bitmap scan and the
+motion-object pipeline -- the object line buffer is filled on one line and
+shown on the next, and the first emitted column is bitmap column hs+2 where
+MAME has hs+0. A delay does not mirror, so the flip counts it twice. Both are
+invisible upright, which is how they survived; they are also the "Check sprite
+horizontal location on actual hardware" item already on the core's own list,
+and settling them needs a board, not a simulation.
+
+--- a/rtl/CCastles.v
++++ b/rtl/CCastles.v
+@@ -185,7 +185,7 @@
+         vr <= #1 BD;
+    else
+       if (VBLANK)
+-         vi <= vr;
++         vi <= PLAYER2 ? vr + 8'd231 : vr;
+       else
+       begin
+          HSYNCd <= #1 HSYNC;
