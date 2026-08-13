@@ -1273,3 +1273,93 @@ and are worth recording so they are not repeated: strokes placed at *different*
 heights are confounded by the vignette, which varies with position, and a high
 exposure pushes all three into the flat top of the tonemap where they read
 identically.
+
+## 15. Space Duel — how a coin becomes a game (**corroborated**)
+
+The machine boots, draws and runs attract mode with no input at all, so it is
+easy to believe it is playable long before it is. It is not: a coin has to be
+*accepted*, and until it is, the start button is deliberately ignored. Three
+facts, each read off the source and then measured.
+
+### 15.1 A coin can be held too long
+
+`COIN65.MAC`'s own commentary is unusually explicit, and worth quoting because
+it inverts the obvious guess:
+
+> a valid coin is defined as between 16 and 800 ms of coin present, preceded
+> and followed by 33 ms of coin absent ... A count from 27-31 (less than 16-20
+> ms) is too short. A count of 0 (more than 800 ms) is too long. Both of these
+> cases are simply reset to 31.
+
+So the coin line has a **window, not a threshold**. `$CNSTT` counts down from
+31 while the coin is present — fast for five samples, then once per eight
+interrupts — and reaching zero means the mechanism is stuck, not that the
+player was generous. A held line buys nothing.
+
+`credit_sd.rs` measures it rather than trusting the arithmetic, sweeping the
+hold and reading `$$CRDT` (the credit total, CPU `0020`) directly through the
+link's symbol table:
+
+| hold (frames) | ms | credits |
+|---|---|---|
+| 2 | 33 | 1 |
+| 10 | 163 | 1 |
+| 20 | 325 | 1 |
+| 40 | 650 | 1 |
+| 48 | 780 | 1 |
+| **60** | **975** | **0** |
+| **72** | **1170** | **0** |
+
+The boundary falls between 780 ms and 975 ms, exactly where the commentary
+puts it. The credit lands about half a second after the coin goes *away* —
+`$PSTSL`, the post-coin slam timer, runs down first.
+
+### 15.2 Select comes before start
+
+`AST2RD.MAC:514-517` documents `STRTLOK` (CPU `03EE`) in three values:
+
+```text
+STRTLOK:                ;0=GAME IN PROGRESS
+                        ;80=NO STARTS ALLOWED
+                        ;40=SELECT PUSHED...STARTS OK
+```
+
+At `AST2RD.MAC:1042` the start check opens with `BIT STRTLOK / BMI 40$` —
+"LOCKED OUT (NO SELECT YET)?" — so while the byte is `80` the start button is
+never even read; control falls through to the game-select handler instead.
+That handler (`AST2RD.MAC:1087-1098`) edge-detects a *fresh* press —
+`BIT LASTGAM / BPL` (not pressed) `/ BVS` (was pressed last time) — and only
+then does `LDX #40 / STX STRTLOK` unlock starting.
+
+So the sequence is **coin, then select, then start**, with the button released
+between. A script that inserts a coin and presses start buys a credit and
+plays nothing.
+
+### 15.3 The byte is the witness
+
+Measured end to end in `credit_sd.rs`, with the game's own variables read from
+RAM rather than the picture guessed at:
+
+```text
+after a coin:   credits 1, STRTLOK 80
+after select:   credits 1, STRTLOK 40
+after start:    credits 0, STRTLOK 00
+```
+
+The credit is spent and `STRTLOK` reaches `00`, which Atari's comment defines
+as A GAME IN PROGRESS. That is the strongest available statement that the
+machine is being played, and it needs no eyes.
+
+Corroborated afterwards by the picture: with the controls live, `play_sd.rs`
+sees the flight inputs change the display within **one frame**, and the strokes
+drawn per frame drop from attract's 446-562 to a steady 171-180 — a game screen
+is a sparser thing than a title sequence.
+
+### 15.4 What this corrects
+
+Earlier work in this project held the coin for 72 frames on the reasoning that
+the debounce needed about 53. The arithmetic was right and the conclusion was
+backwards: 72 frames is 1.17 seconds, past the 800 ms ceiling, and bought
+nothing. Anything that scripts the panel — `play_sd.rs`,
+`chill65-window`'s capture and its live producer — now uses a 20-frame coin and
+presses select before start.

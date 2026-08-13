@@ -25,3 +25,4 @@ pub mod ir;
 pub mod lexer;
 pub mod macros;
 pub mod reduce;
+pub mod sd;

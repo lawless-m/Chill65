@@ -8,6 +8,13 @@ members = [
     "crates/chill65-wasm",
 ]
 
+# `chill65-window` is deliberately outside the workspace. It path-depends on
+# the sibling Trexy checkout for the tube renderer, and a workspace member's
+# manifest is read by every `cargo build` here — so including it would make
+# this repository unbuildable for anyone without Trexy beside it. Excluded, it
+# is built on purpose from its own directory and the root stays self-contained.
+exclude = ["crates/chill65-window"]
+
 [workspace.package]
 edition = "2021"
 license = "MIT"

@@ -1,0 +1,30 @@
+[package]
+name = "chill65-window"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Space Duel in a window, drawn by the Trexy tube renderer"
+publish = false
+
+# Not a workspace member — see the root Cargo.toml's `exclude` note. Because of
+# that this manifest cannot inherit anything, so every field is spelled out.
+#
+# The two Trexy crates are path dependencies even though `beam-trace` is now on
+# crates.io. That is deliberate: `tube-renderer` is not published, and its API
+# is typed in terms of `beam_trace::Sample`. A registry copy of `beam-trace`
+# would be a second, distinct crate whose `Sample` is a different type, and the
+# two would not unify. The publish is for the wider world; this frontend wants
+# the same source the renderer beside it was built against.
+[dependencies]
+chill65-runtime = { path = "../chill65-runtime" }
+chill65-asm = { path = "../chill65-asm" }
+beam-trace = { path = "../../../Trexy/crates/beam-trace" }
+tube-renderer = { path = "../../../Trexy/crates/tube-renderer" }
+
+# Version requirements match Trexy's own workspace so cargo unifies on one
+# wgpu. `Field::new` takes a `&wgpu::Device`; two wgpu versions in the graph
+# would be two unrelated types and would not compile.
+winit = "0.30"
+wgpu = "30.0"
+pollster = "1.0"
+bytemuck = { version = "1.25", features = ["derive"] }
