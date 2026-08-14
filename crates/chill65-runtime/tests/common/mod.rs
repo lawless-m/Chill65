@@ -130,14 +130,17 @@ pub const SD_ROOTS: [&str; 15] = [
 
 /// The assembly errors the fifteen-module link still reports.
 ///
-/// All six are `expression ended unexpectedly` and none is an undefined
-/// symbol. `gate1.md` §0a records that the image is nevertheless *exact*, so
-/// none of them changes an emitted byte.
+/// **None, as of the HLL65 dialect work.** It reported six for most of this
+/// project's life, all `expression ended unexpectedly`, and `gate1.md` §0a
+/// records that the image was *exact* regardless — none of them ever changed
+/// an emitted byte. Teaching the front end Tempest's five HLL65 rules
+/// (`asm: five rules HLL65 needs and HLL65F never asked for`) resolved them
+/// as a side effect, and the byte gate confirms the image did not move: still
+/// 2,048 and 36,864 bytes exact.
 ///
 /// This is a pin, not a tolerance. If the count or the kind ever moves, the
-/// builders below fail loudly rather than quietly assembling something else:
-/// a seventh error would mean the image is no longer the one the gate proved.
-pub const SD_EXPECTED_ERRORS: usize = 6;
+/// builders below fail loudly rather than quietly assembling something else.
+pub const SD_EXPECTED_ERRORS: usize = 0;
 pub const SD_EXPECTED_ERROR_TEXT: &str = "expression ended unexpectedly";
 
 struct SdSearch {
@@ -250,4 +253,114 @@ pub fn build_sd_ship(corpus: &Path) -> Vec<u8> {
 /// The fifteen-module program link, CPU `0000-8FFF`, with its symbol table.
 pub fn build_sd_program(corpus: &Path) -> SdBuild {
     build_sd(corpus, &SD_ROOTS, SD_EXPECTED_ERRORS)
+}
+
+// ---------------------------------------------------------------------------
+// Tempest
+// ---------------------------------------------------------------------------
+
+/// The vector ROM: CPU `3000-3FFF`, `ALEXEC.COM`'s parts `136002.011`/`.012`.
+pub const TE_VEC_ROM_BASE: u16 = 0x3000;
+pub const TE_VEC_ROM_LEN: usize = 0x1000;
+
+/// The program ROM: CPU `9000-DFFF`, parts `136002.001` through `.010`.
+pub const TE_PROG_BASE: u16 = 0x9000;
+pub const TE_PROG_LEN: usize = 0x5000;
+
+/// Where Tempest's relocatable region begins. `ALEXEC.MAP`'s Section Summary
+/// opens `. ABS. 0000 A8B0`, and `chill65-asm/tests/gate_te.rs` asserts all
+/// eleven sections land on that table.
+pub const TE_SECTION_ORIGIN: u16 = 0xA8B0;
+
+/// The twelve link units, in `ALEXEC.COM`'s order. Order is load-bearing.
+pub const TE_ROOTS: [&str; 12] = [
+    "ALWELG.MAC",
+    "ALSCOR.MAC",
+    "ALDISP.MAC",
+    "ALEXEC.MAC",
+    "ALSOUN.MAC",
+    "ALVROM.MAC",
+    "ALCOIN.MAC",
+    "ALLANG.MAC",
+    "ALHARD.MAC",
+    "ALTEST.MAC",
+    "ALEARO.MAC",
+    "ALVGUT.MAC",
+];
+
+/// The assembly errors the twelve-module link reports: none.
+///
+/// A pin, not a tolerance. `gate_te.rs` proves this link byte-identical to
+/// `TEMPST.LDA`, and it assembles clean doing it, so any error means the image
+/// is no longer that one.
+pub const TE_EXPECTED_ERRORS: usize = 0;
+
+pub struct TeBuild {
+    /// Address-keyed, exactly as the assembler produced it.
+    pub image: BTreeMap<u16, u8>,
+    /// `(address, name, unit)`, sorted — `"global"` for exported symbols.
+    pub symbols: Vec<(u16, String, String)>,
+}
+
+impl TeBuild {
+    /// Flatten a span into bytes, zero-filling anything unwritten.
+    pub fn bytes(&self, base: u16, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| {
+                self.image
+                    .get(&base.wrapping_add(i as u16))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
+    /// Look a symbol up by name, six-character truncated as MACRO-11 does.
+    pub fn symbol(&self, name: &str) -> Option<u16> {
+        let key: String = name.chars().take(6).collect();
+        self.symbols
+            .iter()
+            .find(|(_, n, _)| *n == key)
+            .map(|(a, _, _)| *a)
+    }
+}
+
+/// Assemble Tempest's twelve-module link, with its symbol table.
+///
+/// Copied from [`build_sd`] rather than shared, on the rule the gates follow:
+/// each title's builder answers to its own needs and neither can be bent out
+/// of shape by the other. The differences are the section origin and that this
+/// link tolerates no errors at all.
+pub fn build_te_program(corpus: &Path) -> TeBuild {
+    let p = SdSearch {
+        dir: corpus.to_path_buf(),
+    };
+    let mut a = Assembler::new(&p);
+    a.section_origin = TE_SECTION_ORIGIN;
+    let (image, errors) = match a.assemble_units(&TE_ROOTS) {
+        Ok(img) => (img, Vec::new()),
+        Err(errs) => (std::mem::take(&mut a.image), errs),
+    };
+
+    assert_eq!(
+        errors.len(),
+        TE_EXPECTED_ERRORS,
+        "the twelve-module link must assemble clean, got {}: {errors:#?}",
+        errors.len()
+    );
+
+    let mut symbols: Vec<(u16, String, String)> = a
+        .globals
+        .iter()
+        .map(|(k, v)| (*v, k.clone(), "global".to_string()))
+        .collect();
+    for (unit, table) in &a.unit_locals {
+        for (k, v) in table {
+            if !k.contains('~') {
+                symbols.push((*v, k.clone(), unit.clone()));
+            }
+        }
+    }
+    symbols.sort();
+    TeBuild { image, symbols }
 }

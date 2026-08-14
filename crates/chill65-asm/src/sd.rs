@@ -59,14 +59,16 @@ pub const ROOTS: [&str; 15] = [
 
 /// How many assembly errors the fifteen-module link reports, and of what kind.
 ///
-/// All six are `expression ended unexpectedly` and none is an undefined
-/// symbol; `gate1.md` §0a shows the image is exact regardless, so none of them
-/// changes an emitted byte.
+/// **None, as of the HLL65 dialect work.** It reported six for most of this
+/// project's life, all `expression ended unexpectedly`, and `gate1.md` §0a
+/// shows the image was exact regardless, so none of them ever changed an
+/// emitted byte. Teaching the front end Tempest's five HLL65 rules resolved
+/// them as a side effect; the byte gate confirms the image did not move.
 ///
-/// This is a **pin, not a tolerance**. A seventh error, or a different kind,
-/// means the image is no longer the one the gate proved, and [`images`] fails
-/// rather than quietly handing back something else.
-pub const EXPECTED_ERRORS: usize = 6;
+/// This is a **pin, not a tolerance**. An error, or a different kind, means
+/// the image is no longer the one the gate proved, and [`images`] fails rather
+/// than quietly handing back something else.
+pub const EXPECTED_ERRORS: usize = 0;
 pub const EXPECTED_ERROR_TEXT: &str = "expression ended unexpectedly";
 
 /// Space Duel's two ROM images, ready for `SdMachine::load_roms`.

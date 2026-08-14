@@ -199,3 +199,109 @@ Phase 3 — the MAME differential harness. The plan is emphatic that it be built
 For Space Duel the harness has a head start it did not have for Crystal
 Castles: MAME ships a `spacduel` driver, the images are byte-identical, and
 the runtime is already proven deterministic frame for frame.
+
+## Tempest — the same bar, a third machine
+
+Tempest boots, draws, passes its own diagnostic and runs attract mode
+deterministically, on a board that adds two things neither earlier title has:
+a colour vector generator and a second processor.
+
+| Check | Result |
+|---|---|
+| `vg_lists_te` | 14 real display lists execute and terminate cleanly |
+| `boot_te` | boots at frame 17, 3,447 interrupts, 3,447 `VGSTART` strobes, 365 segments |
+| `selftest_te` | **12 ROM checksums and 5 condition flags, all zero** |
+| `attract_te` | 1,200 frames, 751 distinct pictures, two runs identical |
+| `roms_te` | both ROM builders agree on all 24,576 bytes |
+
+```text
+CHILL65_CORPUS=/path/to/tempest \
+  cargo test -p chill65-runtime --test vg_lists_te -- --ignored --nocapture
+  cargo test -p chill65-runtime --test boot_te     -- --ignored --nocapture
+  cargo test -p chill65-runtime --test selftest_te -- --ignored --nocapture
+  cargo test -p chill65-runtime --test attract_te  -- --ignored --nocapture
+  cargo test -p chill65-runtime --test roms_te     -- --ignored --nocapture
+```
+
+### What is new, and where it came from
+
+**The vector generator is the same machine.** `VGMC.MAC` is byte-identical
+between the Space Duel and Tempest corpora — same md5 — so every opcode, the
+five-level stack, the word addressing and the `ZZ` rules are shared verbatim.
+Exactly one thing differs: the status word. `ALDISP.MAC:34-35` defines
+`MZCOLO=8` — "NEW COLOR STAT BIT MASK" — against `MZBRIT=0`, and
+`ALVGUT.MAC:224`'s `VGSTAT` ORs them into the high byte, so a colour word is
+`68xx` and an intensity word `60xx`. Bit 11 *selects* which field the word
+carries; `ALDISP.MAC:1182-1185` issues one of each back to back, which is the
+proof, since a word carrying both would need only one. The fields overlap, so
+combining them corrupts in both directions: `ALVROM.MAC:161-163`'s `CSTAT`
+emits `68C0+colour`, whose `C0` reads as a bright intensity, and an intensity
+word's `F0` reads as colour 0. `Vg::stat_decode` keeps Space Duel's behaviour
+as the default, so that board is untouched by construction.
+
+**The palette is part of the picture.** Sixteen entries at `COLPORT`
+(`ALCOMN.MAC:241`), rewritten every frame by `ALDISP.MAC:1078-1100`.
+`TeMachine::frame_hash` folds the colour RAM in beside the segments, because a
+frame whose geometry is unchanged but whose colours moved is a different
+picture — and leaving it out would blind the attract test's wedge detection to
+exactly the animation Tempest is known for.
+
+**The math box, modelled functionally.** `MBUDOC.DOC:23-73` documents all 32
+addresses with per-operation cycle timings, and `mbox.rs` implements the
+operations rather than executing `MBUCOD.V05`'s microcode, per
+`atari-recompiler-plan.md` §6. Two questions the documentation does not settle
+were settled by the game:
+
+- **Nothing is ever busy.** No consumer in the corpus requires observing
+  busy=1 — every one polls with a `BMI`-shaped loop that falls through. The
+  binding constraint runs the other way: `ALTEST.MAC:784-799` allows 100 poll
+  iterations before declaring a timeout, so an operation that took too long
+  would fail the diagnostic while one completing instantly cannot.
+- **The divide is unsigned.** `MBTEST` walks its operand upward through every
+  16-bit value (`ALTEST.MAC:777-780`), so it eventually divides `8000` by
+  `8000` and still demands 1. Two's complement would give -1 and fail the box.
+
+**`5000` is two things at once.** `ALCOMN.MAC:267-268` makes `INTACK` the same
+address as `WTCHDG`, so one write both feeds the watchdog and acknowledges the
+interrupt — and `ALHARD.MAC:56` strobes it once, relying on both. Space Duel
+keeps them apart.
+
+**The cadence is the reverse of Space Duel's.** Nine interrupts per frame
+(`ALEXEC.MAC:49-52` holds the mainline until `FRTIMR` reaches 9) at 250 Hz,
+the 3 kHz timer over twelve: 6,048 cycles per interrupt, 54,432 per frame.
+`ALWELG.MAC:580` says the game runs "28 PER SECOND" and 9 x 250 Hz is 27.8,
+which is what that comment rounds. Worth recording because `sd.rs` lists the
+divide-by-twelve hypothesis as *dead* for Space Duel, whose measured period is
+6,144.
+
+`te.rs` and `mbox.rs` carry 99 source citations and 12 explicit `UNVERIFIED`
+markers between them; `vg.rs` gained more of both.
+
+### Two traps worth recording
+
+- **Tempest's display lists never halt.** `VGHALT` is called only by the
+  self-test — `ALTEST.MAC:486`, "PLACE HALT AT END OF DISPLAY LIST" — and the
+  main display path never places one. Its lists end in a `JMPL`, double
+  buffered, and go round until the CPU stops them; `ALHARD.MAC:170-175`
+  restarts the generator every interrupt on finding the halt bit set, which is
+  why the strobe count is one per *interrupt* rather than one per frame. So
+  budget exhaustion is the ordinary case here where it is a fault on Space
+  Duel. One pass is the picture the phosphor shows: running to the budget drew
+  76,000 segments for a picture of 365, and the pass detector stops when the
+  generator revisits a *top-level* word — depth matters, because a glyph
+  subroutine is legitimately called many times in one list.
+- **The EAROM latches; it does not store.** `ALEARO.MAC:215-224` selects the
+  cell to read with `STA X,EADAL`, where the address carries the cell number
+  and the accumulator happens to hold the control byte. Storing on that write
+  means every read destroys the cell it is reading — and the game caught it:
+  `EARCND` counted 7 until the store was moved to the write-mode strobe on the
+  control port. That is the whole argument for running the diagnostic.
+
+### What attract mode does that Space Duel's does not
+
+Six frames in 1,200 draw nothing, at 309-310, 386 and 930-932 — bursts of one
+to three, the two clusters about 620 frames apart, which at 27.8 frames a
+second is a twenty-two second cycle. That is the attract sequence changing
+screens, clearing the display list and rebuilding it. `attract_te` asserts the
+longest *run* of blank frames rather than the count, because a wedged machine
+would show hundreds in a row and three is the game changing its mind.

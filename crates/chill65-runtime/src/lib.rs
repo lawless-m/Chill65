@@ -41,9 +41,11 @@ pub mod exec;
 pub mod frame;
 pub mod input;
 pub mod machine;
+pub mod mbox;
 pub mod motion;
 pub mod pokey;
 pub mod sd;
+pub mod te;
 pub mod vg;
 pub mod video;
 

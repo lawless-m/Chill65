@@ -26,3 +26,4 @@ pub mod lexer;
 pub mod macros;
 pub mod reduce;
 pub mod sd;
+pub mod te;

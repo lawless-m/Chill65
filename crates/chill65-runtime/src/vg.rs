@@ -318,6 +318,48 @@ fn sign_extend(value: u16, bits: u32) -> i32 {
     ((value as i32) << shift) >> shift
 }
 
+/// How a status word carries colour and intensity.
+///
+/// The instruction set is not in question: `VGMC.MAC` is byte-identical
+/// between the Space Duel and Tempest corpora, so every opcode, the stack, the
+/// word addressing and the `ZZ` rules are shared. The status word is the one
+/// place two boards disagree, and they disagree because one drives a
+/// monochrome tube and the other a colour one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum StatDecode {
+    /// One word carries both fields, which is what Space Duel writes.
+    ///
+    /// `VGUTR2.MAC:248-250`'s `VGSTAT` always ORs `64` into the high byte, so
+    /// bit 11 is clear in every status word that board emits and there is
+    /// nothing for it to select.
+    #[default]
+    Combined,
+    /// Bit 11 selects *which* field the word carries, which is what Tempest
+    /// needs.
+    ///
+    /// `ALVGUT.MAC:224`'s `VGSTAT` ORs `60` into the high byte and the caller
+    /// supplies the distinguishing bit: `ALDISP.MAC:34-35` defines
+    /// `MZCOLO=8` — "NEW COLOR STAT BIT MASK" — against `MZBRIT=0`. So a
+    /// colour word is `68xx` and an intensity word `60xx`, and
+    /// `ALDISP.MAC:1182-1185` issues one of each back to back, which is the
+    /// proof the bit selects rather than combines: if a single word could
+    /// carry both there would be no reason to write two.
+    ///
+    /// It matters because the two fields occupy overlapping bits, so under
+    /// [`Self::Combined`] each word clobbers the other's latch.
+    /// `ALVROM.MAC:161-163`'s `CSTAT` emits `68C0+colour`, whose low byte has
+    /// bits 6 and 7 set: read as an intensity field that is `(0x68C0 >> 5) & 7`
+    /// — a bright 6 — so every colour change would also rewrite the intensity.
+    /// Read the other way an intensity word's `F0` gives `0xF0 & 0x0F`, so
+    /// every intensity change would reset the colour to 0. Selecting keeps the
+    /// game's two-word sequence meaning what it says.
+    ///
+    /// **UNVERIFIED:** what the `C0` in a colour word's low byte means. It is
+    /// constant across every `CSTAT` in the picture ROM, so it is carried in
+    /// [`Vg::window_bits`]' company rather than acted on.
+    ColorSelect,
+}
+
 #[derive(Clone, Debug)]
 pub struct Vg {
     /// Word address, 0x000-0xFFF.
@@ -334,6 +376,8 @@ pub struct Vg {
     pub color: u8,
     /// Window-control bits from the status class, recorded but not acted on.
     pub window_bits: u16,
+    /// How the status word's colour and intensity fields are read.
+    pub stat_decode: StatDecode,
     pub x: i32,
     pub y: i32,
     pub halted: bool,
@@ -358,6 +402,7 @@ impl Vg {
             intensity: 0,
             color: 0,
             window_bits: 0,
+            stat_decode: StatDecode::Combined,
             x: 0,
             y: 0,
             halted: true,
@@ -497,10 +542,33 @@ impl Vg {
             0b011 => {
                 if w & 0x1000 == 0 {
                     // Status / colour. VGMC.MAC:64, VGMC.MAC:146.
-                    // Bits 4-7 hold VGBRIT's high nibble; the hardware uses
-                    // VGBRIT's top three bits, one place further right.
-                    self.intensity = ((w >> 5) & 0x7) as u8;
-                    self.color = (w & 0x0F) as u8;
+                    match self.stat_decode {
+                        StatDecode::Combined => {
+                            // Bits 4-7 hold VGBRIT's high nibble; the hardware
+                            // uses VGBRIT's top three bits, one place further
+                            // right.
+                            self.intensity = ((w >> 5) & 0x7) as u8;
+                            self.color = (w & 0x0F) as u8;
+                        }
+                        // Bit 11 says which field this word carries, and the
+                        // other latch is left alone — see [`StatDecode`].
+                        StatDecode::ColorSelect if w & 0x0800 != 0 => {
+                            self.color = (w & 0x0F) as u8;
+                        }
+                        StatDecode::ColorSelect => {
+                            // `VGBRIT` counts 00,10,20..F0 (ALDISP.MAC:1184),
+                            // so the whole nibble is kept rather than the top
+                            // three bits the monochrome board uses.
+                            //
+                            // **UNVERIFIED:** whether the colour board's Z DAC
+                            // is three bits or four. Keeping the fourth loses
+                            // nothing if it turns out to be three, and cannot
+                            // be recovered if it is dropped.
+                            self.intensity = ((w >> 4) & 0xF) as u8;
+                        }
+                    }
+                    // Bit 11 is the selector under `ColorSelect` and must not
+                    // be folded in here; the mask stops at 0x0700 regardless.
                     self.window_bits = w & 0x0700;
                 } else {
                     // Scale. VGMC.MAC:77.
@@ -739,6 +807,76 @@ mod tests {
         assert_eq!(vg.window_bits, 0x200);
         assert_eq!(vg.intensity, 2, "bits 4-7 shifted one right");
         assert_eq!(out.len(), 1, "no clipping is applied");
+    }
+
+    /// Run with Tempest's decode selected.
+    fn run_color(words: &[u16]) -> (Vg, Vec<Segment>, Stop) {
+        let m = mem(words);
+        let mut vg = Vg::new();
+        vg.stat_decode = StatDecode::ColorSelect;
+        vg.reset(0);
+        let mut out = Vec::new();
+        let stop = vg.run(&m, 10_000, &mut out);
+        (vg, out, stop)
+    }
+
+    #[test]
+    fn color_select_takes_one_field_per_word() {
+        // The two words `ALDISP.MAC:1182-1185` writes back to back, built the
+        // way the game builds them: `ALVROM.MAC:161-163`'s CSTAT emits
+        // `68C0+colour`, and `VGSTA1` pairs `MZBRIT=0` with a `VGBRIT` value
+        // counting 00,10,20..F0.
+        let cstat = |c: u16| 0x68C0 + c;
+        let brit = |b: u16| 0x6000 + (b << 4);
+
+        // Colour first, then intensity: each must leave the other alone.
+        let (vg, _, _) = run_color(&[cstat(5), brit(0xF), HALT]);
+        assert_eq!(vg.color, 5, "the colour word set the colour");
+        assert_eq!(vg.intensity, 0xF, "the intensity word set the intensity");
+
+        // And in the other order, which is the case that would break if the
+        // decode combined: a colour word carries C0 in its low byte, and read
+        // as intensity that is a bright vector rather than no change.
+        let (vg, _, _) = run_color(&[brit(0xA), cstat(3), HALT]);
+        assert_eq!(vg.intensity, 0xA, "the colour word left intensity alone");
+        assert_eq!(vg.color, 3);
+    }
+
+    #[test]
+    fn the_two_fields_would_clobber_each_other_if_combined() {
+        // The failure this decode exists to prevent, in both directions.
+        // Under the combined rule each of the game's two words rewrites the
+        // latch the other one owns.
+        let words = [0x6000 + (0xA << 4), 0x68C0 + 5, HALT];
+
+        let (vg, _, _) = run_color(&words);
+        assert_eq!((vg.intensity, vg.color), (0xA, 5), "each word keeps to itself");
+
+        let (vg, _, _) = run(&words);
+        assert_eq!(
+            vg.intensity, 6,
+            "combined mode reads the colour word's C0 as an intensity"
+        );
+
+        // And the other way: an intensity word's F0 low byte becomes colour 0.
+        let (vg, _, _) = run(&[0x68C0 + 5, 0x6000 + (0xF << 4), HALT]);
+        assert_eq!(vg.color, 0, "combined mode reads the intensity as a colour");
+    }
+
+    #[test]
+    fn the_selector_bit_is_not_mistaken_for_a_window_bit() {
+        let (vg, _, _) = run_color(&[0x68C0 + 5, HALT]);
+        assert_eq!(vg.window_bits, 0, "bit 11 stays out of the window mask");
+    }
+
+    #[test]
+    fn combined_mode_is_unchanged_by_the_new_decode() {
+        // Space Duel's `VGSTAT` always ORs 64 (VGUTR2.MAC:248-250), so bit 11
+        // is clear in every status word it emits and both fields ride in one.
+        let stat = 0x6400 + (4 << 4) + 3;
+        let (vg, _, _) = run(&[stat, HALT]);
+        assert_eq!(vg.intensity, 2, "bits 4-7 shifted one right, as before");
+        assert_eq!(vg.color, 3);
     }
 
     #[test]
