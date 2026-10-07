@@ -1,9 +1,10 @@
-//! `chill65-window` — Space Duel on a modelled vector tube.
+//! `chill65-window` — Space Duel or Tempest on a modelled vector tube.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use chill65_window::{capture, window};
+use tube_renderer::View;
 
 const USAGE: &str = "\
 usage: chill65-window [options]
@@ -14,10 +15,16 @@ options:
   --self-check       report the GPU adapter and the renderer's shaders
   --capture FILE     play a scripted game and write a .btr0 beam trace
   --seconds N        how long to capture (default 10)
+  --view NAME        which readout to open on: beauty (default), fast, slow,
+                     deposit, energy, samples. Tab cycles them while running.
+                     `energy` is the legible one until Trexy's beauty tonemap
+                     can hold a picture with a bright explosion and a faint
+                     web in the same frame.
   --help
 
-The game's source directory must be given in CHILL65_CORPUS. No ROMs are
-distributed with this project; see the README.
+The game's source directory must be given in CHILL65_CORPUS, and which game it
+is comes from what is in it — Space Duel and Tempest are both understood. No
+ROMs are distributed with this project; see the README.
 ";
 
 fn main() -> ExitCode {
@@ -29,7 +36,9 @@ fn main() -> ExitCode {
         }
         Some("--capture") => run_capture(&args[1..]),
         Some("--self-check") => window::self_check(),
-        None => corpus().and_then(window::run),
+        None => corpus().and_then(|c| window::run(c, View::default())),
+        Some("--view") => view(&args[1..]).and_then(|v| Ok((corpus()?, v)))
+            .and_then(|(c, v)| window::run(c, v)),
         Some(other) => Err(format!("unknown argument {other}\n\n{USAGE}")),
     };
 
@@ -42,13 +51,22 @@ fn main() -> ExitCode {
     }
 }
 
+/// The readout named after `--view`, or the names it could have been.
+fn view(rest: &[String]) -> Result<View, String> {
+    let name = rest.first().ok_or("--view needs a name")?;
+    View::from_name(name).ok_or_else(|| {
+        let names: Vec<&str> = View::ALL.iter().map(|v| v.name()).collect();
+        format!("no readout called {name} — try one of {}", names.join(", "))
+    })
+}
+
 /// The corpus directory, or a message explaining what is missing.
 fn corpus() -> Result<PathBuf, String> {
     std::env::var("CHILL65_CORPUS")
         .map(PathBuf::from)
         .map_err(|_| {
-            "CHILL65_CORPUS is not set — point it at the Space Duel source \
-             directory. No ROMs are distributed with this project."
+            "CHILL65_CORPUS is not set — point it at the Space Duel or Tempest \
+             source directory. No ROMs are distributed with this project."
                 .to_owned()
         })
 }

@@ -312,6 +312,42 @@ pub fn intensity_drive(code: u8) -> f32 {
     (code as f32 / 7.0).powf(INTENSITY_GAMMA)
 }
 
+/// The same, for the colour board, whose Z code is four bits wide.
+///
+/// [`StatDecode::ColorSelect`] keeps a status word's whole nibble rather than
+/// its top three bits, so a [`BeamMove`]'s intensity arrives on one of *two*
+/// scales depending on which instruction set it:
+///
+/// - **A status word** carries `VGBRIT` whole. `ALVGUT.MAC:218` documents
+///   `VGSTAT`'s entry condition as "(Y)=VECTOR BRIGHTNESS (0,10,20,...,F0)",
+///   which is a nibble, 0-15.
+/// - **A vector word's `ZZ` field** is three bits and carries `VGBRIT`'s upper
+///   three. `ALVGUT.MAC:332` says exactly that — "(VGBRIT)=VECTOR BRIGHTNESS
+///   (ONLY THE UPPER 3 BITS ARE USED)" — and `ALVGUT.MAC:349` EORs them into
+///   the word's high bits.
+///
+/// A `ZZ` code is therefore the nibble shifted right one, and this shifts it
+/// back before the same power law [`intensity_drive`] reasons out is applied.
+/// The running game corroborates: over 200 attract frames its beam carries
+/// codes 5, 6, 7 and 12 and nothing else, and the two common ones — 6 and 12 —
+/// are one `VGBRIT` of `C0` arriving by the two routes.
+///
+/// **UNVERIFIED: where the two ranges meet.** A status word *could* set a
+/// nibble below 8, and it would be indistinguishable here from a `ZZ` code and
+/// read as the dimmer of the two. Tempest never writes one — that needs a
+/// `VGBRIT` below `80`, and none appears.
+///
+/// **UNVERIFIED, inherited:** whether the colour board's Z DAC is four bits at
+/// all. See [`StatDecode::ColorSelect`], which keeps the fourth because it can
+/// be dropped later and cannot be recovered.
+pub fn intensity_drive_color(code: u8) -> f32 {
+    let nibble = if code >= 8 { code } else { code << 1 };
+    if nibble == 0 {
+        return 0.0;
+    }
+    (nibble as f32 / 15.0).powf(INTENSITY_GAMMA)
+}
+
 /// Sign-extend an `n`-bit two's-complement field.
 fn sign_extend(value: u16, bits: u32) -> i32 {
     let shift = 32 - bits;
@@ -1115,6 +1151,28 @@ mod tests {
         // The field is three bits; anything above is not a brightness.
         assert_eq!(intensity_drive(8), 0.0);
         assert_eq!(intensity_drive(0x0F), 1.0);
+    }
+
+    #[test]
+    fn the_colour_boards_two_intensity_routes_meet_on_one_scale() {
+        assert_eq!(intensity_drive_color(0), 0.0, "code 0 is off");
+        assert_eq!(intensity_drive_color(0x0F), 1.0, "a full nibble is full");
+        // The pair the running game emits: one VGBRIT of C0, seen through a
+        // status word and through a vector's ZZ field.
+        assert_eq!(
+            intensity_drive_color(6),
+            intensity_drive_color(12),
+            "ZZ 6 and nibble C are the same brightness"
+        );
+        // Monotonic within each route, but not across the two: a ZZ code of 7
+        // is `VGBRIT` `E0` and outshines a status nibble of 8, which is `80`.
+        for code in 1..7u8 {
+            assert!(intensity_drive_color(code) < intensity_drive_color(code + 1));
+        }
+        for code in 8..0x0Fu8 {
+            assert!(intensity_drive_color(code) < intensity_drive_color(code + 1));
+        }
+        assert!(intensity_drive_color(7) > intensity_drive_color(8));
     }
 
     #[test]

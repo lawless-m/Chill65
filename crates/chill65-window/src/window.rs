@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use tube_renderer::{DepositMode, Field, FieldShaders, TubeParams, View};
+use tube_renderer::{DepositMode, Field, FieldShaders, TubeParams, TubeProfile, View};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -18,11 +18,30 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::live::LiveMachine;
-use crate::machine::{apply_key, BINDINGS};
+use crate::machine::{apply_key, Game};
 
 /// Matches `tube-shell`'s own display height, so the deposit buffer and the
 /// tube profile behave identically here.
 const DISPLAY_HEIGHT: u32 = 512;
+
+/// The tube these games were played on: a colour XY monitor, landscape 4:3.
+///
+/// `TubeParams::default()` is `TubeProfile::VECTREX`, which is **portrait** 3:4
+/// — the right tube for the machine Trexy was written against and the wrong one
+/// for either of ours. Both boards drive a landscape face: Space Duel's full
+/// scale is 256 by 192 (`vg::FULL_SCALE_X`) and Tempest's screen-boundary
+/// diagnostic paints a box on a 4:3 tube (`te::FULL_SCALE_X`). Nothing else in
+/// the shipped profile is claimed to fit — a Wells-Gardner 6100 profile does
+/// not exist yet — but the aspect is not a matter of taste and is fixed here.
+fn tube_params() -> TubeParams {
+    TubeParams {
+        profile: TubeProfile {
+            aspect_w: 4.0,
+            aspect_h: 3.0,
+        },
+        ..TubeParams::default()
+    }
+}
 
 /// The shaders the renderer needs, plus the blit that puts it on screen.
 const SHADERS: [&str; 11] = [
@@ -111,17 +130,30 @@ fn instance() -> wgpu::Instance {
     wgpu::Instance::new(descriptor)
 }
 
-/// Open the window and play.
-pub fn run(corpus: PathBuf) -> Result<(), String> {
+/// Open the window and play whichever game the corpus holds.
+///
+/// `view` is the renderer's readout, and it is selectable — with `Tab` while
+/// running — because the default one currently cannot be played on. Trexy's
+/// **beauty** pass loses a vector picture: isolated strokes disappear and only
+/// the places where strokes pile up survive, so Tempest's web vanishes and its
+/// text comes through as blobs. The energy readout shows the same field
+/// faithfully and decays as the phosphor does, so it is playable. This is not
+/// our end of the wire — the deposit the renderer is given is correct, which
+/// `--capture` and `tube-shell --view deposit` demonstrate together — so the
+/// switch is a way round it and not a fix.
+pub fn run(corpus: PathBuf, view: View) -> Result<(), String> {
     let shaders = load_shaders()?;
-    println!("Space Duel. Keys:\n{BINDINGS}\n");
+    let game = Game::detect(&corpus)?;
+    println!("{}. Keys:\n{}", game.title(), game.bindings());
+    println!("  Tab          readout, now {}\n", view.name());
 
     let event_loop = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
-        live: LiveMachine::spawn(corpus),
+        live: LiveMachine::spawn(game, corpus),
         shaders,
         state: None,
+        view,
     };
     event_loop
         .run_app(&mut app)
@@ -145,6 +177,7 @@ struct App {
     live: LiveMachine,
     shaders: Vec<(&'static str, String)>,
     state: Option<State>,
+    view: View,
 }
 
 impl App {
@@ -159,7 +192,7 @@ impl App {
 
     fn build(&mut self, event_loop: &ActiveEventLoop) -> Result<State, String> {
         let attrs = Window::default_attributes()
-            .with_title("Chill65 — Space Duel")
+            .with_title(format!("Chill65 — {}", self.live.game().title()))
             .with_inner_size(winit::dpi::LogicalSize::new(900.0, 1000.0));
         let window = Arc::new(
             event_loop
@@ -203,7 +236,7 @@ impl App {
             &device,
             &queue,
             DISPLAY_HEIGHT,
-            TubeParams::default(),
+            tube_params(),
             FieldShaders {
                 deposit: self.source("deposit.wgsl"),
                 splat: self.source("deposit_splat.wgsl"),
@@ -380,6 +413,15 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                     return;
                 }
+                if code == KeyCode::Tab && event.state == ElementState::Pressed && !event.repeat {
+                    let next = View::ALL
+                        .iter()
+                        .position(|v| *v == self.view)
+                        .map_or(0, |i| (i + 1) % View::ALL.len());
+                    self.view = View::ALL[next];
+                    println!("readout: {}", self.view.name());
+                    return;
+                }
                 // winit repeats a held key; a repeat must not queue a second
                 // coin, and the switch is already in the state the repeat
                 // would set.
@@ -452,7 +494,7 @@ impl App {
         );
         state
             .field
-            .render(&state.device, &state.queue, View::default(), &window);
+            .render(&state.device, &state.queue, self.view, &window);
 
         let mut encoder = state
             .device

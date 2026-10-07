@@ -1,10 +1,11 @@
 //! The machine running in real time, feeding a ring buffer.
 //!
-//! The window draws whenever the display lets it; the machine runs at
-//! 61.5234 Hz whatever the window is doing. So the two are separated by a ring
-//! buffer and a thread, and share exactly one thing: the clock. `elapsed()` is
-//! the renderer's `T_now` *and* the origin the sample timestamps are placed
-//! against, which is what keeps the beam on the tube in step with the game.
+//! The window draws whenever the display lets it; the machine runs at its own
+//! rate — 61.5234 Hz for Space Duel, 27.78 Hz for Tempest — whatever the window
+//! is doing. So the two are separated by a ring buffer and a thread, and share
+//! exactly one thing: the clock. `elapsed()` is the renderer's `T_now` *and*
+//! the origin the sample timestamps are placed against, which is what keeps the
+//! beam on the tube in step with the game.
 //!
 //! This mirrors `tube-shell`'s own producer (`source.rs`), including the small
 //! things that matter: run a little ahead of the renderer but never far ahead,
@@ -19,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use beam_trace::{RingBuffer, Sample, DEFAULT_CAPACITY};
 
-use crate::machine::{offset_onto, SdControls, SdProducer, FRAME_SECONDS};
+use crate::machine::{offset_onto, Controls, Game, Producer};
 
 /// How far ahead of the renderer the machine may run.
 const LOOKAHEAD_SECONDS: f64 = 0.05;
@@ -27,48 +28,36 @@ const LOOKAHEAD_SECONDS: f64 = 0.05;
 /// How long to sleep when there is nothing to produce.
 const IDLE: Duration = Duration::from_millis(2);
 
-/// The coin line is held for this many frames per requested insertion.
-///
-/// `COIN65.MAC` accepts between 16 and 800 ms of coin present and rejects
-/// anything longer as a stuck mechanism; `chill65-runtime/tests/credit_sd.rs`
-/// measures the window as 2 to 48 frames and `hardware.md` §15.1 records it.
-/// A key press is an unpredictable length, so the producer latches the line
-/// for a fixed spell inside that window on the player's behalf — which also
-/// means a key held down cannot jam the mech.
-const COIN_HOLD_FRAMES: u32 = 20;
-
-/// The left coin, `0800` D2. A set bit means a coin is present.
-const COIN_BIT: u8 = 0b100;
-
 /// A machine running on its own thread, and the beam it has produced.
 pub struct LiveMachine {
     ring: Arc<Mutex<RingBuffer>>,
-    controls: Arc<Mutex<SdControls>>,
+    controls: Arc<Mutex<Controls>>,
     status: Arc<Mutex<String>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     start: Instant,
+    game: Game,
 }
 
 impl LiveMachine {
     /// Start the machine. Assembling the ROMs takes a few seconds and happens
     /// on the thread, so this returns at once and [`Self::status`] reports
     /// progress.
-    pub fn spawn(corpus: PathBuf) -> Self {
+    pub fn spawn(game: Game, corpus: PathBuf) -> Self {
         let ring = Arc::new(Mutex::new(RingBuffer::with_capacity(DEFAULT_CAPACITY, 0.0)));
-        let controls = Arc::new(Mutex::new(SdControls::default()));
+        let controls = Arc::new(Mutex::new(Controls::new(game)));
         let status = Arc::new(Mutex::new("assembling the game…".to_owned()));
         let stop = Arc::new(AtomicBool::new(false));
         let start = Instant::now();
 
         let thread = std::thread::Builder::new()
-            .name("space-duel".to_owned())
+            .name(game.title().to_owned())
             .spawn({
                 let ring = Arc::clone(&ring);
                 let controls = Arc::clone(&controls);
                 let status = Arc::clone(&status);
                 let stop = Arc::clone(&stop);
-                move || produce(&corpus, &ring, &controls, &status, &stop, start)
+                move || produce(game, &corpus, &ring, &controls, &status, &stop, start)
             })
             .expect("spawn the machine thread");
 
@@ -79,7 +68,12 @@ impl LiveMachine {
             stop,
             thread: Some(thread),
             start,
+            game,
         }
+    }
+
+    pub fn game(&self) -> Game {
+        self.game
     }
 
     /// Seconds since the machine started. The renderer's `T_now`.
@@ -108,11 +102,11 @@ impl LiveMachine {
     }
 
     /// Change the switches. The window calls this on every key event.
-    pub fn set_controls(&self, c: SdControls) {
+    pub fn set_controls(&self, c: Controls) {
         *self.controls.lock().expect("controls lock") = c;
     }
 
-    pub fn controls(&self) -> SdControls {
+    pub fn controls(&self) -> Controls {
         *self.controls.lock().expect("controls lock")
     }
 }
@@ -127,16 +121,17 @@ impl Drop for LiveMachine {
 }
 
 fn produce(
+    game: Game,
     corpus: &std::path::Path,
     ring: &Mutex<RingBuffer>,
-    controls: &Mutex<SdControls>,
+    controls: &Mutex<Controls>,
     status: &Mutex<String>,
     stop: &AtomicBool,
     start: Instant,
 ) {
     let report = |text: String| *status.lock().expect("status lock") = text;
 
-    let mut producer = match SdProducer::from_corpus(corpus) {
+    let mut producer = match Producer::from_corpus(game, corpus) {
         Ok(p) => p,
         Err(e) => {
             report(e.clone());
@@ -151,6 +146,8 @@ fn produce(
     }
     report("running".to_owned());
 
+    let frame_seconds = game.frame_seconds();
+    let coin_hold_frames = game.coin_hold_frames();
     let mut cursor = start.elapsed().as_secs_f64();
     let mut last_t = 0.0f32;
     let mut coins_consumed = 0u64;
@@ -166,18 +163,14 @@ fn produce(
         let controls = *controls.lock().expect("controls lock");
         // A key tap is far shorter than the coin mech's debounce, so each
         // requested insertion latches the line for long enough to register.
-        if coin_hold == 0 && coins_consumed < controls.coin_pulses {
+        if coin_hold == 0 && coins_consumed < controls.coin_pulses() {
             coins_consumed += 1;
-            coin_hold = COIN_HOLD_FRAMES;
+            coin_hold = coin_hold_frames;
         }
-        let coins = if coin_hold > 0 {
-            coin_hold -= 1;
-            COIN_BIT
-        } else {
-            0
-        };
+        let coin = coin_hold > 0;
+        coin_hold = coin_hold.saturating_sub(1);
 
-        let mut samples = match producer.step_frame(controls.to_input(), coins) {
+        let mut samples = match producer.step_frame(&controls, coin) {
             Ok(s) => s,
             Err(e) => {
                 report(format!("the machine stopped: {e}"));
@@ -186,7 +179,7 @@ fn produce(
             }
         };
         offset_onto(&mut samples, cursor, &mut last_t);
-        cursor += FRAME_SECONDS;
+        cursor += frame_seconds;
 
         let mut ring = ring.lock().expect("ring lock");
         for s in samples {
@@ -207,7 +200,9 @@ mod tests {
             eprintln!("CHILL65_CORPUS unset — skipping the live test");
             return;
         };
-        let live = LiveMachine::spawn(PathBuf::from(corpus));
+        let corpus = PathBuf::from(corpus);
+        let game = Game::detect(&corpus).expect("a game");
+        let live = LiveMachine::spawn(game, corpus);
 
         // Assembling and warming up takes a few seconds.
         let waited = Instant::now();
@@ -245,14 +240,22 @@ mod tests {
 
         // Insert a coin and press start; the beam must keep flowing.
         let mut c = live.controls();
-        c.coin_pulses += 1;
-        c.start = true;
+        c.insert_coin();
+        match &mut c {
+            Controls::Sd(sd) => sd.start = true,
+            Controls::Te(te) => te.start1 = true,
+        }
         live.set_controls(c);
         let before = live.buffered();
         std::thread::sleep(Duration::from_millis(700));
         assert!(live.buffered() >= before, "the machine stopped on a coin");
         let window = live.window(0.0, live.elapsed() as f32);
         beam_trace::validate(&window).expect("still a valid trace after a coin");
-        println!("{} samples buffered, status: {}", live.buffered(), live.status());
+        println!(
+            "{}: {} samples buffered, status: {}",
+            game.title(),
+            live.buffered(),
+            live.status()
+        );
     }
 }

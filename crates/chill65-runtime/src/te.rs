@@ -111,6 +111,41 @@ const VEC_BYTES_WORDS: usize = 0x1000;
 /// chosen so a healthy machine cannot trip it, not a measurement.
 pub const DEFAULT_WATCHDOG_CYCLES: u32 = 200_000;
 
+/// Half the visible width, in generator units.
+///
+/// The counterpart of [`crate::vg::FULL_SCALE_X`], which is Space Duel's, and
+/// it has to be its own number because this board's is not the same one. The
+/// witness is again a diagnostic the game runs on itself: `ALVROM.MAC:334-342`
+/// is `BONDRY`, which `ALVROM.MAC:248` calls "EDGE OF SCREEN".
+///
+/// ```text
+/// BONDRY: CSTAT WHITE      ;SCREEN BOUNDARY
+///         SCAL 1,0
+/// VORBOX::CNTR
+///         VCTR -MX,-MY,0
+///         VCTR 2*MX,0,6
+///         ...
+/// ```
+///
+/// `MX=500.` and `MY=540.` (`ALVROM.MAC:332-333`, decimal overrides in a
+/// `.RADIX 16` file), and `SCAL 1,0` halves, so the box the self-test paints
+/// around the screen runs from -250 to +250 and -270 to +270. Running the
+/// built image with the test switch on puts the beam on exactly those four
+/// numbers, so the decode agrees with the arithmetic.
+///
+/// The axes are not the same length because the generator's units are not
+/// square — the tube is the usual 4:3, and a beam trace carries no aspect
+/// ratio precisely so the tube profile can supply it.
+///
+/// **Attract mode draws well past this**, to about 386 by 314, and that is not
+/// a contradiction: Tempest throws its web and its logo at the viewer, and the
+/// parts that leave the screen are meant to leave it. The board clips them;
+/// so does the glass.
+pub const FULL_SCALE_X: i32 = 250;
+
+/// Half the visible height, in generator units. See [`FULL_SCALE_X`].
+pub const FULL_SCALE_Y: i32 = 270;
+
 const RAM_LEN: usize = 0x0800;
 const COLOR_LEN: usize = 0x10;
 const VEC_RAM_LEN: usize = 0x1000;
